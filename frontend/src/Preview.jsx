@@ -239,7 +239,10 @@ function PreviewSession({
   const languageLabels={ja:'日语',en:'英语',zh:'中文','zh-CN':'中文',auto:'自动检测'};
   const supportsReview = !!preview?.manual_review?.supported;
   const activeReviewDraft = reviewDraft?.sample === selectedId ? reviewDraft : null;
-  const missingDraftCue = supportsReview && !!activeReviewDraft && !cues.some(cue => cue.id === activeReviewDraft.cueId);
+  const activeDraftCueId = activeReviewDraft?.cueId;
+  const hasActiveDraft = !!activeReviewDraft;
+  const missingDraftCue = useMemo(() => supportsReview && hasActiveDraft && !cues.some(cue => cue.id === activeDraftCueId),
+    [supportsReview, hasActiveDraft, cues, activeDraftCueId]);
   const draftConflict = !supportsReview || !activeReviewDraft ? "" : missingDraftCue
     ? "草稿对应的原句已不存在，内容已保留，请复制需要的内容或放弃草稿"
     : activeReviewDraft.revision !== preview.manual_review.revision
@@ -248,7 +251,8 @@ function PreviewSession({
     if (sessionMemory) sessionMemory.current = { projectKey, selection: preview?.selected_id || selection, time, query, rate, followPlayback, timelineMemory, reviewDraft, reviewFilter };
   }, [sessionMemory, projectKey, preview?.selected_id, selection, time, query, rate, followPlayback, timelineMemory, reviewDraft, reviewFilter]);
   useEffect(() => {
-    if(reviewSubmissions.peekResult(selectedId)?.data?.kind==='review-cue' && !preview) return;
+    const pendingReceipt = reviewSubmissions.peekResult(selectedId);
+    if (!preview && (pendingReceipt?.data?.kind === 'review-cue' || pendingReceipt?.kind === "accept")) return;
     const submission = reviewSubmissions.takeResult(selectedId);
     if (!submission) return;
     const advance = advanceAfterSave.current;
@@ -257,6 +261,29 @@ function PreviewSession({
       const message = submission.error.message;
       setReviewError(message);
       if (/409|revision|conflict|版本|冲突/i.test(message)) setReviewConflict(message);
+      return;
+    }
+    if (submission.kind === "accept") {
+      const { preview: acceptedPreview, previewError, stateError, readOwner, readVersion } = submission.data;
+      // Acceptance owns its acknowledgement and follow-up reads across layouts.
+      // A failed read cannot undo the successful write or cause an automatic retry.
+      // A later layout owns a fresh read; it must not inherit an older GET body.
+      const applyAcceptedPreview = acceptedPreview && readOwner === requestVersion && readVersion === requestVersion.current;
+      if (applyAcceptedPreview) {
+        ++requestVersion.current;
+        setLoading(false);
+        setLoadFailed(false);
+        setPreview(acceptedPreview);
+        setSelections(acceptedPreview.selections || []);
+      }
+      const latestRevision = (applyAcceptedPreview ? acceptedPreview : preview)?.manual_review?.revision;
+      setReviewNotice(latestRevision && latestRevision !== submission.revision
+        ? "整片验收已记录，但字幕版本已变化，请核对最新内容后重新验收。"
+        : "整片验收已记录，可继续导出带字幕视频。");
+      setReviewError(previewError || stateError ? `整片验收已记录，但${[
+        previewError && `核对状态刷新失败：${previewError}`,
+        stateError && `任务状态刷新失败：${stateError}`,
+      ].filter(Boolean).join("；")} 请点击“刷新核对状态”重试。` : "");
       return;
     }
     // The write result supersedes reads started before its acknowledgement.
@@ -337,9 +364,9 @@ function PreviewSession({
     }
   };
   const {active,previous,next}=playbackIndex.at(time);
-  const replayCue = (completedReplay && (completedReplay.cueId == null
-    ? cues[completedReplay.index] : cues.find(cue => cue.id === completedReplay.cueId))) ||
-    cues[active >= 0 ? active : recentCue];
+  const completedReplayCue = useMemo(() => completedReplay && (completedReplay.cueId == null
+    ? cues[completedReplay.index] : cues.find(cue => cue.id === completedReplay.cueId)), [completedReplay, cues]);
+  const replayCue = completedReplayCue || cues[active >= 0 ? active : recentCue];
   useEffect(() => {
     if (active >= 0) setRecentCue(active);
   }, [active]);
@@ -609,29 +636,22 @@ function PreviewSession({
         review_status: finalStatus, note: fields.note, translation_confirmed: fields.translation_confirmed }));
     if (submitted) advanceAfterSave.current = advance ? {sample:selectedId, cueId:reviewDraft.cueId, revision:reviewDraft.revision} : null;
   };
-  const acceptReview = async () => {
+  const acceptReview = () => {
     if (!supportsReview || selectedId !== "main" || disabled || loading || reviewBusy || reviewDirty || snapshot?.job?.busy || reviewConflict || draftConflict || !preview.manual_review.summary?.can_accept) return;
-    const version = requestVersion.current;
     ++taskRefreshRequest.current;
-    setReviewBusy(true);
     setReviewError("");
-    try {
+    const readVersion = requestVersion.current;
+    reviewSubmissions.submitAcceptance(selectedId, preview.manual_review.revision, async () => {
       const result = await api.request("/api/review-accept", { project_id: preview.project_id, sample: "main", expected_revision: preview.manual_review.revision, content_passed: true });
-      if (version !== requestVersion.current) return;
       if (!result.accepted) throw new Error("整片验收尚未完成，请刷新并检查验收条件。");
-      setReviewNotice("整片验收已记录，可继续导出带字幕视频。");
-      void refreshTaskState("整片验收已记录");
+      const receipt = { preview: null, previewError: "", stateError: "", readOwner: requestVersion, readVersion };
       const params = new URLSearchParams({ sample: selectedId, project: preview.project_id });
-      const data = await api.request(`/api/preview?${params}`);
-      if (version === requestVersion.current) setPreview(data);
-    } catch (error) {
-      if (version === requestVersion.current) {
-        setReviewError(error.message);
-        if (/409|revision|conflict|版本|冲突/i.test(error.message)) setReviewConflict(error.message);
-      }
-    } finally {
-      if (version === requestVersion.current) setReviewBusy(false);
-    }
+      try { receipt.preview = await api.request(`/api/preview?${params}`); }
+      catch (error) { receipt.previewError = error.message; }
+      try { await onReviewChanged?.(); }
+      catch (error) { receipt.stateError = error.message; }
+      return receipt;
+    });
   };
   const nextUnchecked = () => {
     if (reviewDirty || reviewBusy) { setReviewNotice("有未保存修改，请先保存或放弃后再检查下一句。"); return; }

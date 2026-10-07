@@ -31,7 +31,7 @@ from .file_layout import timestamped_project, subtitle_filename, save_subtitle_s
 from .export_progress import sanitize_export_progress
 from .languages import default_target, output_names, manifest_languages, video_output_path
 from .read_cache import SrtReadCache
-from .studio_http import StudioHTTPServer as ThreadingHTTPServer, static_file_path
+from .studio_http import StudioHTTPServer as ThreadingHTTPServer, RequestReader, static_file_path
 from .studio_origin import create_server
 from .runner import PipelineConfig, ProjectLock, atomic_json, engine_paths, pid_alive, run_pipeline, validate_config
 from .subtitles import parse_srt
@@ -156,6 +156,7 @@ class StudioController:
         self._persist_pending=None
         self._persist_revision=0
         self._persist_result_revision=0
+        self._closing=False
         summaries=saved.get('last_runs',{})
         self._last_runs={}
         if isinstance(summaries,dict):
@@ -398,7 +399,21 @@ class StudioController:
 
     def idle_ready(self):
         with self.lock:
-            return not self.job['busy'] and not self._persist_active and self._persist_pending is None
+            return not self._closing and not self.job['busy'] and not self._persist_active and self._persist_pending is None
+
+    def touch(self,server):
+        with self.lock:
+            if self._closing:return False
+            server.last_touch=time.monotonic()
+            return True
+
+    def claim_idle_shutdown(self,server):
+        # Task admission and the final idle decision share one lock. Once
+        # claimed, even an already queued request cannot start a new worker.
+        with self.lock:
+            if not self.idle_ready() or time.monotonic()-server.last_touch<=180:return False
+            self._closing=True
+            return True
 
     def _recent_state(self):
         result=[]
@@ -702,6 +717,7 @@ class StudioController:
     def start(self,data):
         launch_error=None
         with self.lock:
+            if self._closing:raise RuntimeError('本机服务正在退出，请重新打开工作台后继续。')
             self._assert_project(data.get('project_id'))
             if self.job['busy']:raise ValueError('已有任务正在处理')
             action=data.get('action')
@@ -1159,9 +1175,12 @@ class StudioController:
         return path
 
     def open_result(self,target,project_id=None):
-        with self.lock:
-            self._assert_project(project_id)
-            return self._open_result(target)
+        def launch(_view,path):
+            # _read_view rechecks the selection epoch under the live lock
+            # immediately before this OS side effect, after all file I/O.
+            os.startfile(path)
+            return {'opened':True,'path':str(path)}
+        return self._read_view(lambda view:view._open_result_path(target),project_id,finish=launch)
 
     def _review_selection_for_write(self,data):
         if not data.get('project_id'):raise ValueError('请刷新当前项目后再保存校对')
@@ -1210,28 +1229,23 @@ class StudioController:
                 result=accept_final(project,True,expected_revision=data['expected_revision'])
             return result
 
-    def _open_result(self,target):
+    def _open_result_path(self,target):
         project=self._project_path()
         if target in ('draft-video','draft-video-folder'):
-            video=self.draft_video_path()
+            video=self._draft_video_path()
             if video is None:raise ValueError('尚无与当前字幕一致的草稿视频')
-            path=video if target=='draft-video' else video.parent
-            os.startfile(path)
-            return {'opened':True,'path':str(path)}
+            return video if target=='draft-video' else video.parent
         if target in ('video','video-folder'):
-            video=self.exported_video_path()
+            video=self._exported_video_path()
             if video is None:raise ValueError('尚无可用的正式导出视频')
-            path=video if target=='video' else video.parent
-            os.startfile(path)
-            return {'opened':True,'path':str(path)}
+            return video if target=='video' else video.parent
         candidates={'project':project,'review':self._contained_path(project,'review.html'),
                     'exports':self._contained_path(project,'导出'),
                     'source-folder':Path(self.source).resolve().parent if self.source else None,
                     'siliconflow-review':self._contained_path(project,'硅基流动识别试听.html')}
         path=candidates.get(target)
         if path is None or not path.exists():raise ValueError('结果尚未生成')
-        os.startfile(path)
-        return {'opened':True,'path':str(path)}
+        return path
 
     def pick(self,kind):
         if kind not in ('source','campaign','baseline'):raise ValueError('不支持的文件选择类型')
@@ -1245,6 +1259,27 @@ class StudioController:
 def make_handler(controller,token,host,static_dir):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
+
+        def setup(self):
+            super().setup()
+            reader=RequestReader(self.connection,self.rbufsize)
+            self.rfile.close()
+            self.rfile=reader
+
+        def handle_one_request(self):
+            self.rfile.begin_read(self.server.request_timeout)
+            try:return super().handle_one_request()
+            finally:self.rfile.end_read()
+
+        def parse_request(self):
+            try:return super().parse_request()
+            finally:self.rfile.end_read()
+
+        def end_headers(self):
+            # Parser errors and interim responses also get the ordinary write
+            # timeout instead of a nearly exhausted request-read allowance.
+            self.rfile.end_read()
+            return super().end_headers()
 
         def headers_common(self):
             self.send_header('Cache-Control','no-store')
@@ -1290,7 +1325,7 @@ def make_handler(controller,token,host,static_dir):
             if self.headers.get('Host')!=host:return self.json_response({'error':'本机地址不匹配'},403)
             if path.startswith('/api/'):
                 if not authorize_request(self.headers,token,host):return self.json_response({'error':'请从桌面入口重新打开程序'},403)
-                self.server.last_touch=time.monotonic()
+                if not controller.touch(self.server):return self.json_response({'error':'本机服务正在退出，请重新打开工作台后继续。'},503)
                 try:
                     query=parse_qs(parsed.query,keep_blank_values=True)
                     sample=query.get('sample',[None])[0]
@@ -1323,12 +1358,16 @@ def make_handler(controller,token,host,static_dir):
 
         def do_POST(self):
             if not authorize_request(self.headers,token,host):return self.json_response({'error':'本机请求校验失败，请从桌面入口重新打开'},403)
-            self.server.last_touch=time.monotonic()
+            if not controller.touch(self.server):return self.json_response({'error':'本机服务正在退出，请重新打开工作台后继续。'},503)
             if self.headers.get('Content-Type','').split(';')[0]!='application/json':return self.json_response({'error':'需要JSON请求'},415)
             try:
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0<length<=64_000:raise ValueError('请求大小无效')
-                data=json.loads(self.rfile.read(length))
+                self.rfile.begin_read(self.server.request_timeout)
+                try:body=self.rfile.read(length)
+                finally:self.rfile.end_read()
+                if len(body)!=length:raise ValueError('请求正文不完整')
+                data=json.loads(body)
                 if not isinstance(data,dict):raise ValueError('请求格式无效')
                 path=urlsplit(self.path).path
                 routes={'/api/project':controller.select_project,'/api/credentials':controller.save_credentials,
@@ -1426,7 +1465,7 @@ def main(argv=None):
     def idle_shutdown():
         while True:
             time.sleep(10)
-            if controller.idle_ready() and time.monotonic()-server.last_touch>180:
+            if controller.claim_idle_shutdown(server):
                 server.shutdown();return
     threading.Thread(target=idle_shutdown,daemon=True).start()
     try:server.serve_forever(poll_interval=.3)

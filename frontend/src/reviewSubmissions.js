@@ -16,6 +16,20 @@ export function getReviewSubmissions(owner, projectKey) {
   const operations = new Map(), listeners = new Set();
   let version = 0;
   const publish = () => { version += 1; listeners.forEach(listener => listener()); };
+  const submit = (sample, operation, request) => {
+    if (store.pending(sample)) return false;
+    operations.set(sample, operation);
+    publish();
+    // Keep both success and failure even when no layout is mounted.
+    Promise.resolve().then(request).then(data => {
+      operation.status = "success";
+      operation.data = data;
+    }, error => {
+      operation.status = "error";
+      operation.error = error;
+    }).then(publish);
+    return true;
+  };
   const store = {
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     getSnapshot: () => version,
@@ -26,19 +40,11 @@ export function getReviewSubmissions(owner, projectKey) {
       return operation?.status !== 'pending' ? operation : null;
     },
     submit(sample, draft, request) {
-      if (store.pending(sample)) return false;
       const operation = { sample, cueId: draft.cueId, revision: draft.revision, fields: { ...draft.fields }, status: "pending" };
-      operations.set(sample, operation);
-      publish();
-      // Keep both success and failure even when no layout is mounted.
-      Promise.resolve().then(request).then(data => {
-        operation.status = "success";
-        operation.data = data;
-      }, error => {
-        operation.status = "error";
-        operation.error = error;
-      }).then(publish);
-      return true;
+      return submit(sample, operation, request);
+    },
+    submitAcceptance(sample, revision, request) {
+      return submit(sample, { kind: "accept", sample, revision, status: "pending" }, request);
     },
     takeResult(sample) {
       const operation = operations.get(sample);

@@ -386,6 +386,35 @@ class AzureTransportTests(unittest.TestCase):
                 self.azure.transcribe(self.audio, **dict(self.kwargs, **changes))
         self.assertEqual(self.ledger.calls, [])
 
+    def test_response_copy_cannot_replace_input_audio(self):
+        before = self.audio.read_bytes()
+        alias = self.audio.parent / 'alias'
+        alias.mkdir()
+        for destination in (self.audio, alias / '..' / self.audio.name):
+            self.audio.write_bytes(before)
+            with self.subTest(destination=destination), mock.patch.object(
+                    self.azure.urllib.request, 'build_opener',
+                    return_value=mock.Mock(open=mock.Mock(return_value=HttpResult()))):
+                with self.assertRaises(ValueError):
+                    self.azure.transcribe(self.audio, **dict(self.kwargs, raw_path=destination))
+                self.assertEqual(self.audio.read_bytes(), before)
+        self.assertEqual(self.ledger.calls, [])
+
+    def test_response_copy_cannot_replace_another_shared_paid_response(self):
+        response_root = self.ledger.path.parent / 'responses'
+        for relative in ('azure/other-request.json', 'qwen/other-request.json'):
+            destination = response_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            before = b'{"protected_paid_response":true}'
+            destination.write_bytes(before)
+            with self.subTest(relative=relative), mock.patch.object(
+                    self.azure.urllib.request, 'build_opener',
+                    return_value=mock.Mock(open=mock.Mock(return_value=HttpResult()))):
+                with self.assertRaises(ValueError):
+                    self.azure.transcribe(self.audio, **dict(self.kwargs, raw_path=destination))
+                self.assertEqual(destination.read_bytes(), before)
+        self.assertEqual(self.ledger.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -187,6 +187,131 @@ class StudioHTTPSecurityTests(unittest.TestCase):
             self.assertEqual(server.errors, [])
         self.controller.stop.assert_not_called()
 
+    def drip(self, stream, server, value=b' ', *, seconds=.6):
+        # Keep supplying bytes sooner than the idle timeout, without ever
+        # finishing the request. A read-phase deadline must still close it.
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            try:
+                stream.sendall(value)
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                break
+            with server.changed:
+                if server.active == 0:
+                    break
+            time.sleep(.025)
+        with server.changed:
+            self.assertEqual(server.active, 0, 'Dripped bytes extended the request read deadline')
+
+    def test_unauthenticated_dripped_headers_have_an_absolute_deadline(self):
+        with self.server(timeout=.2, capacity=1) as (server, host):
+            with self.local_socket(server) as stream:
+                stream.sendall(f'GET / HTTP/1.1\r\nHost: {host}\r\nX-Drip: '.encode())
+                self.wait_active(server, 1)
+                self.drip(stream, server, b'a')
+                self.assert_closed(stream)
+            self.assertEqual(self.request(server)[0], 200)
+            self.assertEqual(server.errors, [])
+
+    def test_dripped_request_line_has_an_absolute_deadline(self):
+        with self.server(timeout=.2, capacity=1) as (server, _host):
+            with self.local_socket(server) as stream:
+                stream.sendall(b'GET /unfinished')
+                self.wait_active(server, 1)
+                self.drip(stream, server, b'a')
+                self.assert_closed(stream)
+            self.assertEqual(self.request(server)[0], 200)
+            self.assertEqual(server.errors, [])
+
+    def test_authenticated_dripped_body_expires_without_executing_stop(self):
+        with self.server(timeout=.2, capacity=1) as (server, host):
+            with self.local_socket(server) as stream:
+                stream.sendall((f'POST /api/stop HTTP/1.1\r\nHost: {host}\r\nX-Subtitle-Token: {self.token}\r\n'
+                                'Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{}').encode())
+                self.wait_active(server, 1)
+                self.drip(stream, server)
+                self.assert_closed(stream)
+            self.assertEqual(self.request(server)[0], 200)
+            self.assertEqual(server.errors, [])
+        self.controller.stop.assert_not_called()
+
+    def test_body_eof_with_short_valid_json_does_not_execute_stop(self):
+        self.controller.stop.return_value = {'stopped': True}
+        with self.server(capacity=1) as (server, host):
+            with self.local_socket(server) as stream:
+                stream.sendall((f'POST /api/stop HTTP/1.1\r\nHost: {host}\r\nX-Subtitle-Token: {self.token}\r\n'
+                                'Content-Type: application/json\r\nContent-Length: 30\r\n\r\n{}').encode())
+                stream.shutdown(socket.SHUT_WR)
+                response = http.client.HTTPResponse(stream)
+                try:
+                    response.begin()
+                    self.assertEqual(response.status, 400)
+                    self.assertIn('error', json.loads(response.read()))
+                finally:
+                    response.close()
+            self.wait_active(server, 0)
+            self.assertEqual(self.request(server)[0], 200)
+        self.controller.stop.assert_not_called()
+
+    def test_valid_headers_and_body_get_independent_read_budgets(self):
+        self.controller.stop.return_value = {'stopped': True}
+        with self.server(timeout=.3, capacity=1) as (server, host):
+            with self.local_socket(server) as stream:
+                stream.sendall((f'POST /api/stop HTTP/1.1\r\nHost: {host}\r\nX-Subtitle-Token: {self.token}\r\n'
+                                'Content-Type: application/json\r\nContent-Length: 4\r\n').encode())
+                self.wait_active(server, 1)
+                time.sleep(.18)
+                stream.sendall(b'\r\n{')
+                time.sleep(.18)
+                stream.sendall(b'}  ')
+                response = http.client.HTTPResponse(stream)
+                try:
+                    response.begin()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(json.loads(response.read()), {'stopped': True})
+                finally:
+                    response.close()
+            self.wait_active(server, 0)
+            self.assertEqual(self.request(server)[0], 200)
+        self.controller.stop.assert_called_once_with()
+
+    def test_request_read_deadlines_do_not_cancel_slow_post_business_work(self):
+        def stop():
+            time.sleep(.15)
+            return {'stopped': True}
+        self.controller.stop.side_effect = stop
+        with self.server(timeout=.05, capacity=1) as (server, host):
+            with self.local_socket(server) as stream:
+                stream.sendall((f'POST /api/stop HTTP/1.1\r\nHost: {host}\r\nX-Subtitle-Token: {self.token}\r\n'
+                                'Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}').encode())
+                response = http.client.HTTPResponse(stream)
+                try:
+                    response.begin()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(json.loads(response.read()), {'stopped': True})
+                finally:
+                    response.close()
+            self.wait_active(server, 0)
+            self.assertEqual(self.request(server)[0], 200)
+            self.assertEqual(server.errors, [])
+
+    def test_parser_error_response_restores_the_original_write_timeout(self):
+        with self.server(timeout=.2, capacity=1) as (server, _host):
+            observed = []
+            original = server.RequestHandlerClass.end_headers
+            def end_headers(handler):
+                original(handler)
+                observed.append(handler.connection.gettimeout())
+            with patch.object(server.RequestHandlerClass, 'end_headers', end_headers):
+                with self.local_socket(server) as stream:
+                    stream.sendall(b'POST / HTTP/invalid\r\n\r\n')
+                    # The parser's error response may omit an HTTP status line
+                    # for an invalid protocol version; only its bytes matter.
+                    self.assertTrue(stream.recv(4096))
+                    self.wait_active(server, 0)
+            self.assertEqual(observed, [.2])
+            self.assertEqual(self.request(server)[0], 200)
+
     def test_capacity_is_bounded_and_recovers_after_clients_disconnect(self):
         with self.server(timeout=3, capacity=2) as (server, host):
             with self.local_socket(server) as first, self.local_socket(server) as second:

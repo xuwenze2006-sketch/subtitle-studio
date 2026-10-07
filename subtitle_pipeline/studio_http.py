@@ -1,10 +1,12 @@
 """Bounded loopback transport and lexical static-path validation for Studio."""
 from http.server import ThreadingHTTPServer
+import io
 import os
 from pathlib import Path
 import re
 import socket
 import threading
+import time
 
 
 _WINDOWS_DEVICE = re.compile(r'(?i)^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])$')
@@ -31,11 +33,56 @@ def static_file_path(directory, url_path):
     return resolved
 
 
+class _DeadlineSocketReader(io.RawIOBase):
+    """Recompute a phase's remaining time before every underlying recv."""
+
+    def __init__(self, connection):
+        self.connection = connection
+        self.idle_timeout = connection.gettimeout()
+        self.deadline = None
+        self.stream = connection.makefile('rb', 0)
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('HTTP request read deadline exceeded')
+            timeout = remaining if self.idle_timeout is None else min(self.idle_timeout, remaining)
+            self.connection.settimeout(timeout)
+        return self.stream.readinto(buffer)
+
+    def close(self):
+        try:
+            self.stream.close()
+        finally:
+            super().close()
+
+
+class RequestReader(io.BufferedReader):
+    """Bound header/body reads without timers or a controller execution limit."""
+
+    def __init__(self, connection, buffer_size=-1):
+        super().__init__(_DeadlineSocketReader(connection),
+                         buffer_size if buffer_size > 0 else io.DEFAULT_BUFFER_SIZE)
+
+    def begin_read(self, timeout):
+        self.raw.deadline = time.monotonic() + timeout
+
+    def end_read(self):
+        self.raw.deadline = None
+        # Reads can leave a short remaining timeout on the socket. Restore the
+        # original idle allowance before any response or media write.
+        self.raw.connection.settimeout(self.raw.idle_timeout)
+
+
 class StudioHTTPServer(ThreadingHTTPServer):
     """Bound handlers without making slow clients block the accept loop.
 
-    Socket timeouts limit idle network reads/writes, not controller execution;
-    they neither cancel background jobs nor impose a deadline on local work.
+    Header/body phases have absolute read deadlines; writes have idle socket
+    timeouts. Neither cancels background jobs or limits controller execution.
     """
     max_active_requests = 32
     request_timeout = 15.0

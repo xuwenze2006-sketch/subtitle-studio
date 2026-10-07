@@ -75,4 +75,4 @@ npm run build
 
 GitHub Actions 在 Windows 上运行离线后端测试、本机 HTTP / DPAPI 检查、前端测试与构建，并检查 `dist` 是否与源码一致。云端真实识别、人工字幕质量和 QSV 媒体压制不包含在自动回归内。
 
-维护方式见 [CONTRIBUTING](CONTRIBUTING.md)，安全边界见 [SECURITY](SECURITY.md)，本轮结果见 [五项优化验证](docs/验证报告/2026-10-07/全部优化.md)与[真实媒体验收](docs/验证报告/2026-10-07/真实媒体验收.md)。个人迁移记录及一次性修复脚本保留在本机，不是发行工具。
+维护方式见 [CONTRIBUTING](CONTRIBUTING.md)，安全边界见 [SECURITY](SECURITY.md)，验证记录见[重点深度优化](docs/验证报告/2026-10-07/重点深度优化.md)、[五项优化验证](docs/验证报告/2026-10-07/全部优化.md)与[真实媒体验收](docs/验证报告/2026-10-07/真实媒体验收.md)。个人迁移记录及一次性修复脚本保留在本机，不是发行工具。

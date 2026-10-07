@@ -270,10 +270,14 @@ def transcribe(audio_path: Path, *, endpoint: str, key: str,
             or re.fullmatch(r"CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]", request_id, re.IGNORECASE)):
         raise ValueError("Azure request ID must be a safe stable filename")
     ledger_path = Path(ledger.path).resolve()
-    canonical_raw = ledger_path.parent / "responses" / "azure" / (request_id + ".json")
+    audio_path = Path(audio_path).resolve()
+    response_root = (ledger_path.parent / "responses").resolve()
+    canonical_raw = (response_root / "azure" / (request_id + ".json")).resolve()
     destination_raw = Path(raw_path).resolve() if raw_path is not None else canonical_raw
-    if destination_raw in (ledger_path, ledger_path.with_name(ledger_path.name + ".lock")):
-        raise ValueError("Azure response copy must not replace the budget ledger")
+    if destination_raw in (audio_path, ledger_path, ledger_path.with_name(ledger_path.name + ".lock")):
+        raise ValueError("Azure response copy must not replace the input audio or budget ledger")
+    if destination_raw.is_relative_to(response_root) and destination_raw != canonical_raw:
+        raise ValueError("Azure response copy must not replace another shared paid response")
     url = _endpoint_url(endpoint, api_version)
     if not isinstance(key, str) or not key.strip() or re.search(r"[\x00-\x20\x7f]", key):
         raise ValueError("Azure subscription key is missing or invalid")

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Check, Flag, ListChecks, Play, RefreshCw, Save } from "lucide-react";
 import { Button } from "./ui";
 import "./manual-review.css";
@@ -27,7 +27,9 @@ export default function ManualReview({ preview, selectedId, draft, onDraftChange
   const review = preview.manual_review;
   useEffect(() => setConfirmed(false), [selectedId, review.revision]);
   const summary = review.summary || {};
-  const cueIndex = preview.cues.findIndex(cue => cue.id === draft?.cueId);
+  const cueId = draft?.cueId;
+  const cueIndex = useMemo(() => preview.cues.findIndex(cue => cue.id === cueId), [preview.cues, cueId]);
+  const hasUnchecked = useMemo(() => preview.cues.some(cue => !cue.review_status || cue.review_status === "unchecked"), [preview.cues]);
   const cue = preview.cues[cueIndex];
   const fields = draft?.fields;
   const dirty = isReviewDirty(draft);
@@ -45,7 +47,7 @@ export default function ManualReview({ preview, selectedId, draft, onDraftChange
     if (cue && fields && !writesDisabled) onSave(fields.review_status);
   };
   return <section className="manual-review" aria-label="人工核对" onKeyDown={handleShortcut}>
-    <div className="manual-review-heading"><h3><ListChecks size={17} /> 人工核对</h3><Button onClick={onNext} disabled={disabled || busy || !preview.cues.some(item => !item.review_status || item.review_status === "unchecked")}>下一条未检查</Button></div>
+    <div className="manual-review-heading"><h3><ListChecks size={17} /> 人工核对</h3><Button onClick={onNext} disabled={disabled || busy || !hasUnchecked}>下一条未检查</Button></div>
     <div className="manual-review-counts" aria-label="已保存核对统计">
       <strong>已检查 {summary.checked || 0} / {summary.total ?? preview.cues.length}</strong><span>疑点 {summary.issues || 0}</span><span>译文待核对 {summary.pending_translation || 0}</span>
     </div>

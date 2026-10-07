@@ -17,6 +17,7 @@ import json
 import math
 import os
 from pathlib import Path
+import stat
 import tempfile
 import threading
 import time
@@ -188,6 +189,28 @@ def _json_object(body):
     if not isinstance(data, dict):
         raise ValueError("Expected a JSON object.")
     return data
+
+
+def _require_unused_response_path(path):
+    """Inspect entries without treating inaccessible or dangling paths as free."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        # Windows also reports FileNotFoundError for file/child. Check the
+        # nearest existing parent before considering this a creatable path.
+        parent = path.parent
+        while True:
+            try:
+                parent.lstat()
+            except FileNotFoundError:
+                if parent == parent.parent:
+                    raise
+                parent = parent.parent
+            else:
+                if not stat.S_ISDIR(parent.stat().st_mode):
+                    raise CloudRequestError("The response parent is not a directory; no new transmission was started.")
+                return
+    raise CloudRequestError("The response path is already in use; no new transmission was started.")
 
 
 def _retry_delay(headers, attempt):
@@ -421,7 +444,14 @@ class BudgetLedger:
         amount = _money(reserved_cny)
         if not isinstance(request_id, str) or not request_id or not isinstance(provider, str) or not provider:
             raise ValueError("A stable request ID and provider are required.")
-        raw_path = Path(raw_path).resolve()
+        requested_raw_path = Path(raw_path)
+        raw_path = requested_raw_path.resolve()
+        def require_unused_response():
+            # Keep the lexical entry: resolve() follows a dangling symlink,
+            # whose nonexistent target would otherwise appear unoccupied.
+            _require_unused_response_path(requested_raw_path)
+            if requested_raw_path != raw_path:
+                _require_unused_response_path(raw_path)
         if raw_path == self.path or raw_path == self.lock_path:
             raise CloudRequestError("The response path conflicts with the budget ledger.")
         with _file_lock(self._request_lock(request_id), blocking=False) as owns_request:
@@ -453,6 +483,10 @@ class BudgetLedger:
                             raise CloudRequestError("The request has no automatic attempts remaining.")
                         if record["status"] in ("received", "success"):
                             break
+                        # A definitely unsent reservation can outlive a file
+                        # arriving at its response path. Refuse before changing
+                        # attempts or reacquiring cancelled funds.
+                        require_unused_response()
                     if not admitted:
                         if stop_event is not None and stop_event.is_set():
                             raise CloudCancelled("The request was cancelled before transmission.")
@@ -469,7 +503,8 @@ class BudgetLedger:
                             if spent + reserved + amount >= self.stop or spent + reserved + amount > self.budget:
                                 raise BudgetExceeded("The next request would reach the configured spending stop line.")
                             if record is None:
-                                if raw_path.exists() or any(Path(r["raw_path"]) == raw_path for r in data["requests"].values()):
+                                require_unused_response()
+                                if any(Path(r["raw_path"]) == raw_path for r in data["requests"].values()):
                                     raise CloudRequestError("The response path is already in use.")
                                 record = {"provider": provider, "reserved_cny": float(amount), "raw_path": str(raw_path),
                                           "status": "reserved", "attempts": [], "created_at": time.time()}
@@ -508,6 +543,10 @@ class BudgetLedger:
                     if stop_event is not None and stop_event.is_set():
                         raise CloudCancelled("The request was cancelled before transmission.")
                 def begin(current):
+                    # Admission and rate-limit waits may take time. Recheck
+                    # before the durable send marker, retaining the unsent or
+                    # rejected record if a local file appeared meanwhile.
+                    require_unused_response()
                     if before_submit is not None:
                         if (current["provider"] != provider or _money(current["reserved_cny"]) != amount
                                 or Path(current["raw_path"]) != raw_path

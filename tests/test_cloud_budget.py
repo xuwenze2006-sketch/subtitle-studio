@@ -712,6 +712,96 @@ class CloudBudgetTests(unittest.TestCase):
             self.execute(self.must_not_send)
         self.assertEqual(b"keep me", self.raw.read_bytes())
 
+    def test_cancelled_request_with_occupied_raw_path_refuses_before_reserving_or_sending(self):
+        def cancelled():
+            raise cloud.CloudCancelled("before upload")
+        with self.assertRaises(cloud.CloudCancelled):
+            self.execute(cancelled)
+        before = self.path.read_bytes()
+        self.raw.write_bytes(b"external response kept")
+        sent = []
+        with self.assertRaises(cloud.CloudRequestError):
+            self.execute(lambda: sent.append(True) or self.response())
+        self.assertEqual(sent, [])
+        self.assertEqual(self.raw.read_bytes(), b"external response kept")
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_reserved_request_rechecks_raw_path_after_admission_before_sending(self):
+        # A hard exit after reservation leaves this exact unsent state.
+        with patch.object(self.ledger, "_mutate", side_effect=KeyboardInterrupt("before begin")):
+            with self.assertRaises(KeyboardInterrupt):
+                self.execute(self.must_not_send)
+        before = self.path.read_bytes()
+        sent = []
+        def admission():
+            self.raw.write_bytes(b"appeared during local validation")
+        with self.assertRaises(cloud.CloudRequestError):
+            self.execute(lambda: sent.append(True) or self.response(), before_submit=admission)
+        self.assertEqual(sent, [])
+        self.assertEqual(self.raw.read_bytes(), b"appeared during local validation")
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_rate_limit_retry_rechecks_raw_path_without_losing_rejection_or_budget(self):
+        sent = []
+        snapshots = []
+        raw, path = self.raw, self.path
+        class OccupiedDuringWait:
+            def is_set(self): return False
+            def wait(self, _delay):
+                raw.write_bytes(b"appeared during retry wait")
+                snapshots.append(path.read_bytes())
+                return False
+        def send():
+            sent.append(True)
+            return self.response(status=429, headers={"Retry-After": "0"}) if len(sent) == 1 else self.response()
+        with self.assertRaises(cloud.CloudRequestError):
+            self.execute(send, stop_event=OccupiedDuringWait())
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(self.raw.read_bytes(), b"appeared during retry wait")
+        self.assertEqual(self.path.read_bytes(), snapshots[0])
+        self.assertEqual(self.record()["status"], "retry_wait")
+        self.assertEqual(self.ledger.summary()["reserved_cny"], 2)
+
+    def test_raw_path_inspection_error_refuses_before_reserving_or_sending(self):
+        original = Path.lstat
+        def inspect(path):
+            if path == self.raw: raise PermissionError('synthetic response inspection denied')
+            return original(path)
+        sent = []
+        with patch.object(Path, 'lstat', inspect), self.assertRaises((OSError, cloud.CloudRequestError)):
+            self.execute(lambda: sent.append(True) or self.response())
+        self.assertEqual(sent, [])
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.raw.exists())
+
+    def test_response_parent_file_refuses_before_reserving_or_sending(self):
+        parent = self.directory / 'parent-file'
+        parent.write_bytes(b'keep parent bytes')
+        sent = []
+        with self.assertRaises((OSError, cloud.CloudRequestError)):
+            self.execute(lambda: sent.append(True) or self.response(), raw_path=parent / 'raw.json')
+        self.assertEqual(sent, [])
+        self.assertFalse(self.path.exists())
+        self.assertEqual(parent.read_bytes(), b'keep parent bytes')
+
+    def test_dangling_response_symlink_is_occupied_before_any_transmission(self):
+        try:
+            self.raw.symlink_to(self.directory / 'missing-target.json')
+        except OSError as error:
+            self.skipTest(f'Symbolic links unavailable: {error}')
+        sent = []
+        with self.assertRaises(cloud.CloudRequestError):
+            self.execute(lambda: sent.append(True) or self.response())
+        self.assertEqual(sent, [])
+        self.assertFalse(self.path.exists())
+        self.assertTrue(self.raw.is_symlink())
+        self.assertFalse((self.directory / 'missing-target.json').exists())
+
+    def test_missing_response_parent_directories_can_still_be_created(self):
+        raw = self.directory / 'new' / 'nested' / 'raw.json'
+        self.assertEqual(self.execute(raw_path=raw), {'ok': True})
+        self.assertEqual(json.loads(raw.read_bytes()), {'ok': True})
+
     def test_corrupt_ledger_fails_closed(self):
         self.path.write_text("{broken", encoding="utf-8")
         with self.assertRaises(cloud.CloudRequestError):
