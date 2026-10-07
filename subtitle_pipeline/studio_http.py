@@ -1,7 +1,9 @@
 """Bounded loopback transport and lexical static-path validation for Studio."""
 from http.server import ThreadingHTTPServer
+import os
 from pathlib import Path
 import re
+import socket
 import threading
 
 
@@ -38,10 +40,18 @@ class StudioHTTPServer(ThreadingHTTPServer):
     max_active_requests = 32
     request_timeout = 15.0
     request_queue_size = 32
+    # Windows SO_REUSEADDR permits another process to share the same browser
+    # origin. An origin containing review drafts must have one exclusive host.
+    allow_reuse_address = os.name != 'nt'
 
     def __init__(self, *args, **kwargs):
         self._request_slots = threading.BoundedSemaphore(self.max_active_requests)
         super().__init__(*args, **kwargs)
+
+    def server_bind(self):
+        if os.name == 'nt':
+            self.socket.setsockopt(socket.SOL_SOCKET,socket.SO_EXCLUSIVEADDRUSE,1)
+        super().server_bind()
 
     def get_request(self):
         request, address = super().get_request()

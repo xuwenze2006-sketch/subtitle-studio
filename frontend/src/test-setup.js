@@ -4,5 +4,6 @@ import { afterEach, vi } from "vitest";
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  localStorage.clear();
   vi.unstubAllGlobals();
 });

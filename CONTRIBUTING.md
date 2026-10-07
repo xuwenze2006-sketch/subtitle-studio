@@ -32,6 +32,10 @@ npm run build
 
 需要检查真实压制时，可显式运行 `python tests/media_smoke.py`。它生成合成素材，需要 FFmpeg/libass 与 Intel QSV；结果位于忽略的 `验证样例/`。通过离线测试不证明真实服务质量、当前报价、人工审核结果或特定硬件可用。
 
+完整的 CPU/QSV、H.264/HEVC、多音轨、字幕像素和取消恢复检查使用 `python tests/media_acceptance.py --encoders cpu,qsv`；仅 CPU 可传 `--encoders cpu`。该工具生成离线语音合成素材，拒绝覆盖或写出 `验证样例/`，每轮保留独立报告。它不加入日常离线回归；浏览器操作和人耳听看应另外记录。响应基准为 `python tests/studio_review_benchmark.py`，比较 5,000 / 20,000 句的全量/小回执并核对最终视图等价。
+
+`media_export.py` 负责媒体压制、编码身份、音轨校验与发布恢复；`cloud_workflow.py` 通过明确的依赖接口提供任务状态和字幕验收。`environment.py` 负责有时限的离线探测。校对草稿仅序列化白名单字段，跨窗口不得清除另一窗口新写入的草稿；默认浏览器端口记录只保存端口，不保存会话令牌。
+
 提交前运行 `git diff --check`，核对完整暂存清单，并在独立候选目录重新执行测试和构建。CI 的构建一致性检查同时检查已跟踪变更和新增未跟踪资产，避免遗漏带新哈希名的文件。
 
 依赖更新使用 npm 锁文件；评估 `npm audit` 的实际受影响路径，禁止盲目 `npm audit fix --force`。GitHub Actions 固定到完整提交 SHA，更新由 Dependabot 提议、回归后再合入。

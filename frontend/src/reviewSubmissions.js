@@ -21,6 +21,10 @@ export function getReviewSubmissions(owner, projectKey) {
     getSnapshot: () => version,
     pending: sample => operations.get(sample)?.status === "pending",
     hasPending: () => [...operations.values()].some(operation => operation.status === "pending"),
+    peekResult: sample => {
+      const operation=operations.get(sample);
+      return operation?.status !== 'pending' ? operation : null;
+    },
     submit(sample, draft, request) {
       if (store.pending(sample)) return false;
       const operation = { sample, cueId: draft.cueId, revision: draft.revision, fields: { ...draft.fields }, status: "pending" };

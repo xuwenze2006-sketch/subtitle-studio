@@ -40,6 +40,8 @@ def main():
         try:
             assert request('GET','/')[0]==200
             assert request('GET','/api/state',authorized=False)[0]==403
+            assert request('GET','/api/progress',authorized=False)[0]==403
+            assert request('GET','/api/environment',authorized=False)[0]==403
             assert request('GET','/api/media',authorized=False)[0]==403
             assert request('POST','/api/credentials',{'provider':'siliconflow','key':'not-saved'},headers={'Origin':'https://external.invalid'})[0]==403
             secret='fake-siliconflow-key-local-smoke-only'
@@ -48,6 +50,16 @@ def main():
             state=request('GET','/api/state')
             assert state[0]==200 and secret.encode() not in state[2]
             assert json.loads(state[2])['accounts']['siliconflow']['storage']=='encrypted'
+            progress=request('GET','/api/progress')
+            assert progress[0]==200 and secret.encode() not in progress[2]
+            assert 'accounts' not in json.loads(progress[2])
+            assert json.loads(progress[2])['project_id']==json.loads(state[2])['project_id']
+            report={'version':1,'checks':{'cpu':{'available':True,'message':'Offline fixture'}},
+                    'recommended_encoder':'cpu','export_ready':True}
+            with patch('subtitle_pipeline.environment.probe_environment',return_value=report) as probe:
+                environment=request('GET','/api/environment')
+                assert environment[0]==200 and json.loads(environment[2])==report
+                probe.assert_called_once_with()
             assert secret.encode() not in (root/'SubtitlePipeline'/'credentials.json').read_bytes()
             session=request('POST','/api/session',{})
             cookie=session[1]['Set-Cookie']
@@ -75,6 +87,8 @@ def main():
                 assert request('POST','/api/credentials',{'provider':'siliconflow','free_confirmed':True})[0]==400
                 save_prices.assert_not_called()
             assert request('GET','/api/state',headers={'Host':'different.invalid'})[0]==403
+            assert request('GET','/api/progress',headers={'Host':'different.invalid'})[0]==403
+            assert request('GET','/api/environment',headers={'Host':'different.invalid'})[0]==403
             runtime=root/'runtime.json'
             expected={'url':f'http://{host}/#token={token}','pid':os.getpid()}
             studio.atomic_json(runtime,expected)

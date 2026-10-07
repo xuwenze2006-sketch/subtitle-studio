@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from subtitle_pipeline import cloud_workflow as workflow
+from subtitle_pipeline import media_export
 from subtitle_pipeline import runner
 from subtitle_pipeline.cloud_budget import BudgetExceeded, BudgetLedger, HttpResponse
 from subtitle_pipeline.integrity import sha256
@@ -482,8 +483,9 @@ class QwenPipelineTests(unittest.TestCase):
                     destination.write_bytes(b'encoded:'+(self.campaign/'导出'/'captions.srt').read_bytes())
                 elif str(destination)!='-':
                     raise AssertionError('Unexpected export command')
-            with patch.object(workflow,'media_info',return_value=info), \
-                 patch.object(workflow,'audio_digest',return_value='same-audio'), \
+            with patch.object(media_export.environment,'select_encoder',return_value='qsv'), \
+                patch.object(media_export,'media_info',return_value=info), \
+                 patch.object(media_export,'audio_digest',return_value='same-audio'), \
                  patch.object(runner,'run_process',side_effect=encode):
                 workflow.export_video(self.campaign,threading.Event())
         output=self.source.with_name('source_中文字幕_修订版.mp4')

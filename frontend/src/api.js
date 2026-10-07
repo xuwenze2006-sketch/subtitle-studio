@@ -19,7 +19,7 @@ export function createApi() {
   async function request(path, body, options = {}) {
     const { blob = false, signal } = options;
     const endpoint = path.split("?")[0];
-    const timedRead = body === undefined && !blob && ["/api/state", "/api/preview"].includes(endpoint);
+    const timedRead = body === undefined && !blob && ["/api/state", "/api/preview", "/api/environment", "/api/progress"].includes(endpoint);
     // Session setup only establishes a local cookie. Other POSTs can already
     // have saved work or started a paid task and must keep their receipt alive.
     const timedSession = body !== undefined && !blob && endpoint === "/api/session";
@@ -39,7 +39,7 @@ export function createApi() {
     signal?.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => interrupt(new Error(timedSession
       ? "连接本地服务超时，请确认字幕工坊仍在运行，然后重新连接。"
-      : "读取本地服务数据超时，请稍后重试。")), 15000);
+      : "读取本地服务数据超时，请稍后重试。")), endpoint==='/api/environment' ? 30000 : 15000);
     try {
       return await Promise.race([
         sendRequest(path, body, { ...options, signal: controller.signal }),

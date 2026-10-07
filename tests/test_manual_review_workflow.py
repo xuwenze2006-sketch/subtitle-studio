@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from subtitle_pipeline import cloud_workflow as workflow
+from subtitle_pipeline import media_export
 from subtitle_pipeline.subtitles import Cue, render_srt, parse_srt
 from subtitle_pipeline.integrity import sha256
 from tests.test_cloud_workflow import write_complete_qwen_evidence
@@ -87,7 +88,8 @@ class ManualReviewWorkflowTests(unittest.TestCase):
         workflow.accept_final(self.campaign,True,expected_revision=view['revision'])
         # The export inventories audio before considering old output bindings.
         # This test's file is synthetic bytes, not an ffprobe-readable video.
-        with patch.object(workflow,'media_info',return_value={'streams':[
+        with patch.object(media_export.environment,'select_encoder',return_value='qsv'), \
+                patch.object(media_export,'media_info',return_value={'streams':[
                 {'codec_type':'video'},{'codec_type':'audio'}]}), \
                 patch.object(workflow.r,'run_process',side_effect=StopBeforeEncoding):
             with self.assertRaises(StopBeforeEncoding): workflow.export_video(self.campaign,threading.Event())

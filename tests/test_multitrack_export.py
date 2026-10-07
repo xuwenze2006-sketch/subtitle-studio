@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from subtitle_pipeline import cloud_workflow as workflow
+from subtitle_pipeline import media_export
 from subtitle_pipeline.languages import video_output_path
 from tests import test_draft_video as fixtures
 
@@ -24,19 +25,19 @@ class MultiTrackExportTests(unittest.TestCase):
         self.fixture=fixtures.DraftVideoTests();self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.media=media()
-        self.probe=patch.object(workflow,'media_info',return_value=self.media)
+        self.probe=patch.object(media_export,'media_info',return_value=self.media)
         self.probe.start();self.addCleanup(self.probe.stop)
         self.digests=[]
         def digest(path,stop=None,*,index=0):
             self.digests.append((Path(path),index))
             return 'SHA256='+str(index+1)*64
-        self.digest=patch.object(workflow,'audio_digest',side_effect=digest)
+        self.digest=patch.object(media_export,'audio_digest',side_effect=digest)
         self.digest.start();self.addCleanup(self.digest.stop)
         self.bulk_calls=[]
         def digests(path,stop=None,*,expected_count):
             self.bulk_calls.append((Path(path),expected_count))
-            return [workflow.audio_digest(path,stop,index=index) for index in range(expected_count)]
-        self.bulk=patch.object(workflow,'audio_digests',side_effect=digests)
+            return [media_export.audio_digest(path,stop,index=index) for index in range(expected_count)]
+        self.bulk=patch.object(media_export,'audio_digests',side_effect=digests)
         self.bulk.start();self.addCleanup(self.bulk.stop)
 
     def export(self):
@@ -73,7 +74,7 @@ class MultiTrackExportTests(unittest.TestCase):
                 if fault=='missing':output['streams'].pop()
                 elif fault=='swapped':output['streams'][1:]=output['streams'][1:][::-1]
                 else:output['streams'][2]['disposition']['default']=0
-                with patch.object(workflow,'media_info',side_effect=lambda path,stop=None:
+                with patch.object(media_export,'media_info',side_effect=lambda path,stop=None:
                         self.media if Path(path)==self.fixture.source else output):
                     with self.assertRaises(ValueError):self.export()
                 self.assertFalse(video_output_path(self.fixture.source,'zh-CN',draft=True).exists())
@@ -84,7 +85,7 @@ class MultiTrackExportTests(unittest.TestCase):
             value=str(index+1)*64
             if Path(path)!=self.fixture.source and index==1:value='f'*64
             return 'SHA256='+value
-        with patch.object(workflow,'audio_digest',side_effect=digest),self.assertRaises(ValueError):
+        with patch.object(media_export,'audio_digest',side_effect=digest),self.assertRaises(ValueError):
             self.export()
         self.assertFalse(video_output_path(self.fixture.source,'zh-CN',draft=True).exists())
 
@@ -92,17 +93,17 @@ class MultiTrackExportTests(unittest.TestCase):
         def digest(path,stop=None,*,index=0):
             if index==1:raise workflow.r.Cancelled('stop second audio track check')
             return 'SHA256='+'1'*64
-        with patch.object(workflow,'audio_digest',side_effect=digest),self.assertRaises(workflow.r.Cancelled):
+        with patch.object(media_export,'audio_digest',side_effect=digest),self.assertRaises(workflow.r.Cancelled):
             self.export()
         self.assertEqual(workflow.read_json(self.receipt().with_name('encoding-checkpoint.json'))['status'],'encoded')
         self.assertFalse(video_output_path(self.fixture.source,'zh-CN',draft=True).exists())
 
     def fail_copy(self):
-        with patch.object(workflow,'cancellable_copy',side_effect=OSError('synthetic copy failure')),self.assertRaises(OSError):
+        with patch.object(media_export,'cancellable_copy',side_effect=OSError('synthetic copy failure')),self.assertRaises(OSError):
             self.export()
 
     def test_truncated_bulk_inventory_is_not_published_or_retried_per_track(self):
-        with patch.object(workflow,'audio_digests',side_effect=[
+        with patch.object(media_export,'audio_digests',side_effect=[
                 ['SHA256='+'1'*64,'SHA256='+'2'*64],['SHA256='+'1'*64]]),self.assertRaises(ValueError):
             self.export()
         self.assertEqual(self.digests,[])
@@ -119,7 +120,7 @@ class MultiTrackExportTests(unittest.TestCase):
 
     def test_single_track_keeps_legacy_binding_and_completed_encode_recovery(self):
         one=deepcopy(self.media);one['streams'].pop()
-        with patch.object(workflow,'media_info',return_value=one):
+        with patch.object(media_export,'media_info',return_value=one):
             self.fail_copy()
             record=workflow.read_json(self.receipt())
             self.assertNotIn('audio_policy',record['output_binding'])
@@ -168,7 +169,7 @@ class MultiTrackExportTests(unittest.TestCase):
         return lambda path,stop=None:self.media if Path(path)==self.fixture.source else output
 
     def test_unspecified_default_normalization_records_raw_flags_and_resumes_without_encoding(self):
-        with patch.object(workflow,'media_info',side_effect=self.normalized_inventory()):
+        with patch.object(media_export,'media_info',side_effect=self.normalized_inventory()):
             self.fail_copy()
             record=workflow.read_json(self.receipt())
             proof=record['verification']['audio_tracks']
@@ -183,7 +184,7 @@ class MultiTrackExportTests(unittest.TestCase):
         self.assertEqual(self.digests,[])
 
     def test_false_normalization_policy_cannot_skip_revalidating_completed_encode(self):
-        with patch.object(workflow,'media_info',side_effect=self.normalized_inventory()):
+        with patch.object(media_export,'media_info',side_effect=self.normalized_inventory()):
             self.fail_copy()
             record=workflow.read_json(self.receipt())
             record['verification']['audio_tracks']['default_policy']='preserved'

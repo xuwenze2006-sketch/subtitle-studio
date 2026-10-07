@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from subtitle_pipeline import cloud_workflow as workflow
+from subtitle_pipeline import media_export
 from subtitle_pipeline.languages import video_output_path
 from tests import test_draft_video as fixture
 
@@ -81,7 +82,7 @@ class ExportSourceReadTests(unittest.TestCase):
                 workflow.export_video(self.campaign, self.stop, draft=draft)
                 self.encoder.reset_mock()
                 with observed_reads([self.source]) as reads, \
-                     patch.object(workflow, '_publish_video', side_effect=AssertionError('no republish')):
+                     patch.object(media_export, '_publish_video', side_effect=AssertionError('no republish')):
                     workflow.export_video(self.campaign, self.stop, draft=draft)
                 self.assert_complete_reads(reads, [self.source])
                 self.encoder.assert_not_called()
@@ -94,7 +95,7 @@ class ExportSourceReadTests(unittest.TestCase):
         self.write(self.campaign / 'campaign.json', manifest)
         self.encoder.reset_mock()
         with observed_reads([self.source]) as reads, \
-             patch.object(workflow, '_publish_video', side_effect=AssertionError('no republish')):
+             patch.object(media_export, '_publish_video', side_effect=AssertionError('no republish')):
             workflow.export_video(self.campaign, self.stop, draft=True)
         self.assert_complete_reads(reads, [self.source])
         self.encoder.assert_not_called()
@@ -115,7 +116,7 @@ class ExportSourceReadTests(unittest.TestCase):
                 altered = path.read_bytes()
                 self.encoder.reset_mock()
                 with observed_reads([self.source]) as reads, \
-                     patch.object(workflow, 'media_info', side_effect=AssertionError('no media for wrong source')):
+                     patch.object(media_export, 'media_info', side_effect=AssertionError('no media for wrong source')):
                     with self.assertRaises(ValueError):
                         workflow.export_video(self.campaign, self.stop, draft=True)
                 self.assert_complete_reads(reads, [self.source])
@@ -131,7 +132,7 @@ class ExportSourceReadTests(unittest.TestCase):
         self.assertEqual(self.source.stat().st_size, old.st_size)
         self.assertEqual(self.source.stat().st_mtime_ns, old.st_mtime_ns)
         with observed_reads([self.source]) as reads, \
-             patch.object(workflow, 'media_info', side_effect=AssertionError('no media for changed source')):
+             patch.object(media_export, 'media_info', side_effect=AssertionError('no media for changed source')):
             with self.assertRaises(ValueError):
                 workflow.export_video(self.campaign, self.stop, draft=True)
         self.assert_complete_reads(reads, [self.source])
@@ -155,7 +156,7 @@ class ExportSourceReadTests(unittest.TestCase):
         self.write(self.folder / 'state.json', state)
         self.source.write_bytes(b'Z' * self.source.stat().st_size)
         with observed_reads([self.source, other]) as reads, \
-             patch.object(workflow, 'media_info', side_effect=AssertionError('no media for corrupt manifest source')):
+             patch.object(media_export, 'media_info', side_effect=AssertionError('no media for corrupt manifest source')):
             with self.assertRaisesRegex(ValueError, '原.*视频'):
                 workflow.export_video(self.campaign, self.stop, draft=True)
         self.assert_complete_reads(reads, [self.source])
@@ -179,7 +180,7 @@ class ExportSourceReadTests(unittest.TestCase):
         self.assertTrue((self.campaign / '导出' / '草稿视频' / 'result.partial.mp4').exists())
 
     def test_completed_encoding_publication_failure_resumes_with_two_full_source_reads(self):
-        with patch.object(workflow, '_publish_video', side_effect=OSError('owned publication failure')):
+        with patch.object(media_export, '_publish_video', side_effect=OSError('owned publication failure')):
             with self.assertRaises(OSError):
                 workflow.export_video(self.campaign, self.stop, draft=True)
         self.encoder.reset_mock()
@@ -197,7 +198,7 @@ class ExportSourceReadTests(unittest.TestCase):
                 stop.set()
                 raise workflow.r.Cancelled('owned post-encode validation stop')
             return value
-        with patch.object(workflow, 'cancellable_sha256', side_effect=stop_post_encode_source):
+        with patch.object(media_export, 'cancellable_sha256', side_effect=stop_post_encode_source):
             with self.assertRaises(workflow.r.Cancelled):
                 workflow.export_video(self.campaign, self.stop, draft=True)
         checkpoint = workflow.read_json(self.campaign / '导出' / '草稿视频' / 'encoding-checkpoint.json')

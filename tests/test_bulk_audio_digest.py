@@ -8,6 +8,7 @@ from unittest.mock import Mock, call, patch
 
 from subtitle_pipeline import audio_integrity as audio
 from subtitle_pipeline import cloud_workflow as workflow
+from subtitle_pipeline import media_export
 from subtitle_pipeline.local_process import OutputLimitExceeded
 from subtitle_pipeline.runner import Cancelled
 from tests.test_audio_integrity import stream
@@ -61,7 +62,7 @@ class BulkAudioCaptureTests(unittest.TestCase):
 
     def test_one_capture_maps_every_audio_stream_with_packet_copy(self):
         completed = subprocess.CompletedProcess([], 0, stdout=STDOUT, stderr='')
-        with patch.object(workflow, 'capture_process', return_value=completed) as capture:
+        with patch.object(media_export, 'capture_process', return_value=completed) as capture:
             self.assertEqual(self.digest(), HASHES)
         capture.assert_called_once_with([
             'ffmpeg', '-nostdin', '-v', 'error', '-i', str(self.source), '-map', '0:a',
@@ -69,7 +70,7 @@ class BulkAudioCaptureTests(unittest.TestCase):
             stop=self.stop, timeout=300)
 
     def test_invalid_count_or_preexisting_stop_does_not_launch_capture(self):
-        with patch.object(workflow, 'capture_process') as capture:
+        with patch.object(media_export, 'capture_process') as capture:
             for count in (True, 0, -2, '2'):
                 with self.subTest(count=count), self.assertRaises(ValueError):
                     self.digest(count)
@@ -83,7 +84,7 @@ class BulkAudioCaptureTests(unittest.TestCase):
                     subprocess.CalledProcessError(1, ['ffmpeg'], output=STDOUT),
                     OSError('read failure'), OutputLimitExceeded(20)]
         for failure in failures:
-            with self.subTest(failure=failure), patch.object(workflow, 'capture_process', side_effect=failure):
+            with self.subTest(failure=failure), patch.object(media_export, 'capture_process', side_effect=failure):
                 with self.assertRaises(type(failure)) as caught:
                     self.digest()
                 self.assertIs(caught.exception, failure)
@@ -92,11 +93,11 @@ class BulkAudioCaptureTests(unittest.TestCase):
         def capture(*_args, **_kwargs):
             self.stop.set()
             return subprocess.CompletedProcess([], 0, stdout=STDOUT, stderr='')
-        with patch.object(workflow, 'capture_process', side_effect=capture), self.assertRaises(Cancelled):
+        with patch.object(media_export, 'capture_process', side_effect=capture), self.assertRaises(Cancelled):
             self.digest()
 
     def test_successful_exit_with_truncated_records_is_not_success(self):
-        with patch.object(workflow, 'capture_process', return_value=subprocess.CompletedProcess(
+        with patch.object(media_export, 'capture_process', return_value=subprocess.CompletedProcess(
                 [], 0, stdout='0,a,' + HASHES[0], stderr='')), self.assertRaises(ValueError):
             self.digest()
 
@@ -104,8 +105,8 @@ class BulkAudioCaptureTests(unittest.TestCase):
         def parse(_text, _count):
             self.stop.set()
             return list(HASHES)
-        with patch.object(workflow,'capture_process',return_value=subprocess.CompletedProcess(
-                [],0,stdout=STDOUT,stderr='')),patch.object(workflow,'parse_audio_stream_hashes',side_effect=parse):
+        with patch.object(media_export,'capture_process',return_value=subprocess.CompletedProcess(
+                [],0,stdout=STDOUT,stderr='')),patch.object(media_export,'parse_audio_stream_hashes',side_effect=parse):
             with self.assertRaises(Cancelled):
                 self.digest()
 

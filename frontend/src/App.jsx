@@ -30,6 +30,7 @@ import {
 import Workspace from "./Workspace";
 import AccountSettings from "./AccountSettings";
 import Preview from "./Preview";
+import RuntimeSettings from './RuntimeSettings';
 import "./action-feedback.css";
 import { isReviewDirty } from "./ManualReview";
 import { hasPendingReviewSubmissions } from "./reviewSubmissions";
@@ -100,6 +101,7 @@ export default function App() {
   const [page, setPage] = useState("workspace");
   const [historyQuery, setHistoryQuery] = useState("");
   const [engine, setEngine] = useState("local");
+  const [exportEncoder,setExportEncoder]=useState('auto');
   const [snapshot, setSnapshot] = useState(null);
   const [paths, setPaths] = useState({
     source: "",
@@ -143,6 +145,7 @@ export default function App() {
   const mounted = useRef(true);
   const lock = useRef(false);
   const stateReads = useRef({ issued: 0, applied: 0, epoch: 0, data: null });
+  const lastDetailRead=useRef(0);
 
   const applyProject = useCallback((data, { restoreEngine = true } = {}) => {
     setPaths({
@@ -156,19 +159,26 @@ export default function App() {
     setParameters(projectParameters(data));
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async ({progress=false}={}) => {
     const reads = stateReads.current;
     const request = ++reads.issued;
     const epoch = reads.epoch;
     const current = () => mounted.current && epoch === reads.epoch && request > reads.applied;
     let data;
     try {
-      data = await api.request("/api/state");
+      data = await api.request(progress ? '/api/progress' : '/api/state');
     } catch (failure) {
       if (!current()) return reads.data;
       throw failure;
     }
     if (!current()) return reads.data;
+    if(progress) {
+      if(!data.project_id || data.project_id!==reads.data?.project_id || !data.job?.busy ||
+        data.job.action!==reads.data?.job?.action || performance.now()-lastDetailRead.current>=4500) {
+        return refresh();
+      }
+      data={...reads.data,job:data.job,persistence_warning:data.persistence_warning};
+    } else lastDetailRead.current=performance.now();
     // Failed reads never advance this boundary: an older valid read may still help.
     reads.applied = request;
     reads.data = data;
@@ -217,7 +227,7 @@ export default function App() {
     let timer;
     const poll = async () => {
       try {
-        await refresh();
+        await refresh({progress:!!snapshot?.job?.busy});
       } catch (failure) {
         if (!cancelled) {
           setConnection("offline");
@@ -274,7 +284,9 @@ export default function App() {
       if (project?.source !== undefined) applyProject(project, { restoreEngine: false });
       if (action === 'prepare' || action === 'local') setParameters(previous => ({...previous,...values}));
       setFreshTask(false);
-      await api.request("/api/run", { action, ...values, project_id: project?.project_id || snapshot?.project_id });
+      await api.request("/api/run", { action, ...values,
+        ...(['export','export-draft'].includes(action) ? {encoder:exportEncoder} : {}),
+        project_id: project?.project_id || snapshot?.project_id });
       stateReads.current.epoch += 1;
       if (action === 'export' || action === 'export-draft') setPage('workspace');
     });
@@ -578,6 +590,8 @@ export default function App() {
             </div>
           )}
 
+          <RuntimeSettings api={api} connection={connection} encoder={exportEncoder}
+            onEncoderChange={setExportEncoder} disabled={disabled || busy}/>
           {page === "workspace" && (
             <Workspace
               engine={workspaceEngine}

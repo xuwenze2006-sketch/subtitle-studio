@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from subtitle_pipeline import cloud_workflow as workflow
+from subtitle_pipeline import media_export
 from subtitle_pipeline import copy_space
 from subtitle_pipeline.languages import video_output_path
 import tests.test_draft_video as fixtures
@@ -20,7 +21,7 @@ class PublicationSpaceTests(unittest.TestCase):
     def test_known_insufficient_space_does_not_create_copy_or_lose_encode(self):
         test = self.fixture
         with patch.object(copy_space.shutil, 'disk_usage', return_value=SimpleNamespace(free=0)), \
-                patch.object(workflow, 'cancellable_copy', wraps=workflow.cancellable_copy) as copies:
+                patch.object(media_export, 'cancellable_copy', wraps=workflow.cancellable_copy) as copies:
             with self.assertRaises(OSError) as raised:
                 workflow.export_video(test.campaign, test.stop, draft=True)
         self.assertEqual(raised.exception.errno, errno.ENOSPC)
@@ -40,7 +41,7 @@ class PublicationSpaceTests(unittest.TestCase):
                 workflow.export_video(test.campaign, test.stop, draft=True)
         self.assertEqual(raised.exception.errno, errno.ENOSPC)
         test.encoder.reset_mock()
-        with patch.object(workflow, 'audio_digest', return_value='same-audio-hash') as audio:
+        with patch.object(media_export, 'audio_digest', return_value='same-audio-hash') as audio:
             workflow.export_video(test.campaign, test.stop, draft=True)
         self.assertEqual(test.video_encode_count(), 0)
         self.assertEqual(test.decode_check_count(), 0)
@@ -54,7 +55,7 @@ class PublicationSpaceTests(unittest.TestCase):
         test.stop.set()
         final = test.root / 'not-created.mp4'
         with patch.object(copy_space.shutil, 'disk_usage') as usage, \
-                patch.object(workflow, 'cancellable_copy') as copies:
+                patch.object(media_export, 'cancellable_copy') as copies:
             with self.assertRaises(workflow.r.Cancelled):
                 workflow._publish_video(test.source, final, test.stop)
         usage.assert_not_called()
@@ -65,7 +66,7 @@ class PublicationSpaceTests(unittest.TestCase):
         test = self.fixture
         error = OSError(errno.EIO, 'synthetic target-volume metadata failure')
         with patch.object(copy_space.shutil, 'disk_usage', side_effect=error), \
-                patch.object(workflow, 'cancellable_copy') as copies:
+                patch.object(media_export, 'cancellable_copy') as copies:
             with self.assertRaises(OSError) as raised:
                 workflow.export_video(test.campaign, test.stop, draft=True)
         self.assertIs(raised.exception, error)

@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from subtitle_pipeline import cloud_workflow as workflow
+from subtitle_pipeline import media_export
 from subtitle_pipeline import manual_review
 from subtitle_pipeline.languages import video_output_path
 from subtitle_pipeline.subtitles import Cue, parse_srt, render_srt
@@ -39,11 +40,15 @@ class DraftVideoTests(unittest.TestCase):
         self.addCleanup(guards.close)
         guards.enter_context(patch('socket.create_connection', side_effect=AssertionError('No network')))
         guards.enter_context(patch.object(workflow, 'emit'))
-        guards.enter_context(patch.object(workflow, 'media_info', return_value={
+        # Existing evidence fixtures pin their former QSV policy; encoder probes
+        # have separate tests and must not read a real GPU from this fixture.
+        guards.enter_context(patch.object(media_export.environment, 'select_encoder',
+            side_effect=lambda requested, stop=None: 'qsv' if requested == 'auto' else requested))
+        guards.enter_context(patch.object(media_export, 'media_info', return_value={
             'streams': [{'codec_type': 'video', 'width': 640, 'height': 360,
                          'r_frame_rate': '30/1', 'nb_frames': '1200'}],
             'format': {'duration': '40.0'}}))
-        guards.enter_context(patch.object(workflow, 'audio_digest', return_value='same-audio-hash'))
+        guards.enter_context(patch.object(media_export, 'audio_digest', return_value='same-audio-hash'))
         self.encoder = guards.enter_context(patch.object(workflow.r, 'run_process', side_effect=self.fake_encode))
 
     def write(self, path, value):
@@ -176,7 +181,7 @@ class DraftVideoTests(unittest.TestCase):
         self.encoder.assert_not_called()
 
     def test_failed_media_verification_never_publishes_or_records_a_draft(self):
-        with patch.object(workflow, 'audio_digest', side_effect=['source-audio', 'different-audio']):
+        with patch.object(media_export, 'audio_digest', side_effect=['source-audio', 'different-audio']):
             with self.assertRaisesRegex(ValueError, '音频'):
                 workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertFalse(video_output_path(self.source, 'zh-CN', draft=True).exists())
@@ -233,7 +238,7 @@ class DraftVideoTests(unittest.TestCase):
         output_info = {'streams': [{'codec_type': 'video', 'width': 640, 'height': 360,
                                    'r_frame_rate': '30/1', 'nb_frames': '1200'}],
                        'format': {'duration': '40'}}
-        with patch.object(workflow, 'media_info', side_effect=[source_info, output_info]):
+        with patch.object(media_export, 'media_info', side_effect=[source_info, output_info]):
             workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertTrue(video_output_path(self.source, 'zh-CN', draft=True).exists())
 
@@ -243,13 +248,13 @@ class DraftVideoTests(unittest.TestCase):
                                  'r_frame_rate': '30/1',
                                  'nb_frames': '1200' if Path(path) == self.source else '1190'}],
                     'format': {'duration': '40'}}
-        with patch.object(workflow, 'media_info', side_effect=info):
+        with patch.object(media_export, 'media_info', side_effect=info):
             with self.assertRaisesRegex(ValueError, 'nb_frames'):
                 workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertFalse(video_output_path(self.source, 'zh-CN', draft=True).exists())
 
     def fail_after_encoding(self):
-        with patch.object(workflow, 'audio_digest', side_effect=OSError('temporary read failure')):
+        with patch.object(media_export, 'audio_digest', side_effect=OSError('temporary read failure')):
             with self.assertRaises(OSError):
                 workflow.export_video(self.campaign, self.stop, draft=True)
 
@@ -262,7 +267,7 @@ class DraftVideoTests(unittest.TestCase):
                 stop.set()
                 raise workflow.r.Cancelled('cancel post-encode source verification')
             return original(path,stop,**kwargs)
-        with patch.object(workflow,'cancellable_sha256',side_effect=cancel):
+        with patch.object(media_export,'cancellable_sha256',side_effect=cancel):
             with self.assertRaises(workflow.r.Cancelled):
                 workflow.export_video(self.campaign,self.stop,draft=True)
         self.stop.clear()
@@ -277,9 +282,9 @@ class DraftVideoTests(unittest.TestCase):
         self.assertEqual(receipt['size_bytes'],partial.stat().st_size)
         self.assertEqual(len(receipt['source_token']),5)
         self.encoder.reset_mock()
-        with patch.object(workflow,'audio_digest',return_value='same-audio-hash') as audio, \
-                patch.object(workflow,'_publication_evidence',side_effect=AssertionError('pending output needs first media validation')), \
-                patch.object(workflow,'cancellable_sha256',wraps=workflow.cancellable_sha256) as hashes:
+        with patch.object(media_export,'audio_digest',return_value='same-audio-hash') as audio, \
+                patch.object(media_export,'_publication_evidence',side_effect=AssertionError('pending output needs first media validation')), \
+                patch.object(media_export,'cancellable_sha256',wraps=workflow.cancellable_sha256) as hashes:
             workflow.export_video(self.campaign,self.stop,draft=True)
         self.assertEqual(self.video_encode_count(),0)
         self.assertEqual(audio.call_count,2)
@@ -310,7 +315,7 @@ class DraftVideoTests(unittest.TestCase):
                 raise workflow.r.Cancelled('cancel repeated output verification')
             return original(path,stop,**kwargs)
         self.encoder.reset_mock()
-        with patch.object(workflow,'cancellable_sha256',side_effect=cancel):
+        with patch.object(media_export,'cancellable_sha256',side_effect=cancel):
             with self.assertRaises(workflow.r.Cancelled):
                 workflow.export_video(self.campaign,self.stop,draft=True)
         self.assertEqual(self.video_encode_count(),0)
@@ -341,7 +346,7 @@ class DraftVideoTests(unittest.TestCase):
                 stop.set()
                 raise workflow.r.Cancelled('partial hash incomplete')
             return original(path,stop,**kwargs)
-        with patch.object(workflow,'cancellable_sha256',side_effect=cancel):
+        with patch.object(media_export,'cancellable_sha256',side_effect=cancel):
             with self.assertRaises(workflow.r.Cancelled):
                 workflow.export_video(self.campaign,self.stop,draft=True)
         folder=self.campaign/'导出'/'草稿视频'
@@ -440,7 +445,7 @@ class DraftVideoTests(unittest.TestCase):
                 os.utime(self.source,ns=(stat.st_atime_ns,stat.st_mtime_ns+1_000_000_000))
             return digest
         self.encoder.reset_mock()
-        with patch.object(workflow,'cancellable_sha256',side_effect=changed_after_hash):
+        with patch.object(media_export,'cancellable_sha256',side_effect=changed_after_hash):
             with self.assertRaisesRegex(ValueError,'源视频|素材'):
                 workflow.export_video(self.campaign,self.stop,draft=True)
         self.assertEqual(self.video_encode_count(),0)
@@ -453,7 +458,7 @@ class DraftVideoTests(unittest.TestCase):
             if Path(path)==self.source:return '0'*64
             return original(path,stop,**kwargs)
         self.encoder.reset_mock()
-        with patch.object(workflow,'cancellable_sha256',side_effect=changed_digest):
+        with patch.object(media_export,'cancellable_sha256',side_effect=changed_digest):
             with self.assertRaisesRegex(ValueError,'源视频|素材'):
                 workflow.export_video(self.campaign,self.stop,draft=True)
         self.assertEqual(self.video_encode_count(),0)
@@ -472,7 +477,7 @@ class DraftVideoTests(unittest.TestCase):
                     (path.parent/'captions.ass').write_text('changed while sealing',encoding='utf-8')
                 else:path.write_bytes(b'changed while hashing')
             return digest
-        with patch.object(workflow,'cancellable_sha256',side_effect=change_after_hash):
+        with patch.object(media_export,'cancellable_sha256',side_effect=change_after_hash):
             with self.assertRaises(ValueError):
                 workflow.export_video(self.campaign,self.stop,draft=True)
         checkpoint=self.campaign/'导出'/'草稿视频'/'encoding-checkpoint.json'
@@ -504,8 +509,8 @@ class DraftVideoTests(unittest.TestCase):
                 else:path.write_bytes(b'replaced during completed output validation')
             return digest
         self.encoder.reset_mock()
-        with patch.object(workflow,'cancellable_sha256',side_effect=change_after_hash), \
-                patch.object(workflow,'_publication_evidence',wraps=workflow._publication_evidence) as evidence:
+        with patch.object(media_export,'cancellable_sha256',side_effect=change_after_hash), \
+                patch.object(media_export,'_publication_evidence',wraps=workflow._publication_evidence) as evidence:
             with self.assertRaises(ValueError):
                 workflow.export_video(self.campaign,self.stop,draft=True)
         evidence.assert_not_called()
@@ -596,13 +601,13 @@ class DraftVideoTests(unittest.TestCase):
         self.assertEqual(self.video_encode_count(), 1)
 
     def test_retry_after_failed_copy_does_not_repeat_encoding(self):
-        with patch.object(workflow, 'audio_digest', return_value='same-audio-hash') as audio:
+        with patch.object(media_export, 'audio_digest', return_value='same-audio-hash') as audio:
             self.fail_during_copy()
         self.assertEqual(audio.call_count, 2)
         self.assertEqual(self.decode_check_count(), 3)
         self.encoder.reset_mock()
-        with patch.object(workflow, 'audio_digest', return_value='same-audio-hash') as audio, \
-                patch.object(workflow, 'cancellable_sha256', wraps=workflow.cancellable_sha256) as hashes:
+        with patch.object(media_export, 'audio_digest', return_value='same-audio-hash') as audio, \
+                patch.object(media_export, 'cancellable_sha256', wraps=workflow.cancellable_sha256) as hashes:
             workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertEqual(self.video_encode_count(), 0)
         audio.assert_not_called()
@@ -618,7 +623,7 @@ class DraftVideoTests(unittest.TestCase):
         partial = self.campaign / '导出' / '草稿视频' / 'result.partial.mp4'
         partial.write_bytes(b'changed encoded video')
         self.encoder.reset_mock()
-        with patch.object(workflow, 'audio_digest', return_value='same-audio-hash') as audio:
+        with patch.object(media_export, 'audio_digest', return_value='same-audio-hash') as audio:
             workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertEqual(self.video_encode_count(), 1)
         self.assertEqual(audio.call_count, 2)
@@ -628,7 +633,7 @@ class DraftVideoTests(unittest.TestCase):
         self.fail_during_copy()
         self.edit(target_text='修改后的字幕')
         self.encoder.reset_mock()
-        with patch.object(workflow, 'audio_digest', return_value='same-audio-hash') as audio:
+        with patch.object(media_export, 'audio_digest', return_value='same-audio-hash') as audio:
             workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertEqual(self.video_encode_count(), 1)
         self.assertEqual(audio.call_count, 2)
@@ -642,7 +647,7 @@ class DraftVideoTests(unittest.TestCase):
         args[args.index('-preset') + 1] = 'slower-old-setting'
         self.write(checkpoint, saved)
         self.encoder.reset_mock()
-        with patch.object(workflow, 'audio_digest', return_value='same-audio-hash') as audio:
+        with patch.object(media_export, 'audio_digest', return_value='same-audio-hash') as audio:
             workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertEqual(self.video_encode_count(), 1)
         self.assertEqual(audio.call_count, 2)
@@ -672,7 +677,7 @@ class DraftVideoTests(unittest.TestCase):
                     elif corruption == 'old_version': saved['version'] = 0
                     self.write(receipt, saved)
                 self.encoder.reset_mock()
-                with patch.object(workflow, 'audio_digest', return_value='same-audio-hash') as audio:
+                with patch.object(media_export, 'audio_digest', return_value='same-audio-hash') as audio:
                     self.fail_during_copy()
                 self.assertEqual(self.video_encode_count(), 0)
                 self.assertEqual(audio.call_count, 2)
@@ -687,8 +692,8 @@ class DraftVideoTests(unittest.TestCase):
         source_info = {'streams': [{'codec_type': 'video', 'width': 640, 'height': 360,
                                    'r_frame_rate': '30/1'}], 'format': {'duration': '40'}}
         self.encoder.reset_mock()
-        with patch.object(workflow, 'media_info', return_value=source_info), \
-                patch.object(workflow, 'audio_digest', return_value='same-audio-hash') as audio:
+        with patch.object(media_export, 'media_info', return_value=source_info), \
+                patch.object(media_export, 'audio_digest', return_value='same-audio-hash') as audio:
             workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertEqual(self.video_encode_count(), 0)
         self.assertEqual(audio.call_count, 2)
@@ -697,12 +702,12 @@ class DraftVideoTests(unittest.TestCase):
     def test_explicit_unknown_frame_count_remains_valid_cached_evidence(self):
         info = {'streams': [{'codec_type': 'video', 'width': 640, 'height': 360,
                              'r_frame_rate': '30/1'}], 'format': {'duration': '40'}}
-        with patch.object(workflow, 'media_info', return_value=info):
+        with patch.object(media_export, 'media_info', return_value=info):
             self.fail_during_copy()
             receipt = self.campaign / '导出' / '草稿视频' / 'publication-checkpoint.json'
             self.assertIsNone(workflow.read_json(receipt)['verification']['video_fields']['nb_frames'])
             self.encoder.reset_mock()
-            with patch.object(workflow, 'audio_digest', return_value='same-audio-hash') as audio:
+            with patch.object(media_export, 'audio_digest', return_value='same-audio-hash') as audio:
                 workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertEqual(self.video_encode_count(), 0)
         audio.assert_not_called()
@@ -762,7 +767,7 @@ class DraftVideoTests(unittest.TestCase):
         self.assertTrue((folder/'result.partial.mp4').is_file())
         if reuse is not None:self.assertEqual(self.video_encode_count(),0)
         self.stop.clear();self.encoder.reset_mock()
-        with patch.object(workflow,'_publish_video',side_effect=AssertionError('already published')):
+        with patch.object(media_export,'_publish_video',side_effect=AssertionError('already published')):
             workflow.export_video(self.campaign,self.stop,draft=True)
         self.assertEqual(self.video_encode_count(),0)
         self.assertEqual(final.read_bytes(),saved)
@@ -789,7 +794,7 @@ class DraftVideoTests(unittest.TestCase):
 
     def test_already_cancelled_export_does_not_probe_convert_or_encode(self):
         self.stop.set()
-        with patch.object(workflow, 'media_info') as probe:
+        with patch.object(media_export, 'media_info') as probe:
             with self.assertRaises(workflow.r.Cancelled):
                 workflow.export_video(self.campaign, self.stop, draft=True)
         self.encoder.assert_not_called()
@@ -802,7 +807,7 @@ class DraftVideoTests(unittest.TestCase):
             calls.append(path)
             self.stop.set()
             return 'same-audio-hash'
-        with patch.object(workflow, 'audio_digest', side_effect=digest):
+        with patch.object(media_export, 'audio_digest', side_effect=digest):
             with self.assertRaises(workflow.r.Cancelled):
                 workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertEqual(len(calls), 1)
@@ -810,7 +815,7 @@ class DraftVideoTests(unittest.TestCase):
         self.assertEqual(workflow.read_json(self.campaign / '导出' / '草稿视频' / 'encoding-checkpoint.json')['status'], 'encoded')
         self.stop.clear()
         self.encoder.reset_mock()
-        with patch.object(workflow, 'audio_digest', return_value='same-audio-hash') as audio:
+        with patch.object(media_export, 'audio_digest', return_value='same-audio-hash') as audio:
             workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertEqual(self.video_encode_count(), 0)
         self.assertEqual(audio.call_count, 2)
@@ -828,7 +833,7 @@ class DraftVideoTests(unittest.TestCase):
         self.assertFalse(any(path.suffix == '.tmp' for path in self.root.iterdir()))
         self.stop.clear()
         self.encoder.reset_mock()
-        with patch.object(workflow, 'audio_digest', return_value='same-audio-hash') as audio:
+        with patch.object(media_export, 'audio_digest', return_value='same-audio-hash') as audio:
             workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertEqual(self.video_encode_count(), 0)
         audio.assert_not_called()
@@ -848,8 +853,8 @@ class DraftVideoTests(unittest.TestCase):
             return original(src,dst)
         with patch.object(workflow.os,'rename',side_effect=sharing), \
                 patch.object(self.stop,'wait',return_value=False), \
-                patch.object(workflow,'cancellable_copy',wraps=workflow.cancellable_copy) as copy, \
-                patch.object(workflow,'cancellable_sha256',wraps=workflow.cancellable_sha256) as hashes:
+                patch.object(media_export,'cancellable_copy',wraps=workflow.cancellable_copy) as copy, \
+                patch.object(media_export,'cancellable_sha256',wraps=workflow.cancellable_sha256) as hashes:
             workflow.export_video(self.campaign,self.stop,draft=True)
         self.assertEqual(self.video_encode_count(),1)
         self.assertEqual(copy.call_count,1)
@@ -903,7 +908,7 @@ class DraftVideoTests(unittest.TestCase):
                 error=PermissionError('temporary cleanup sharing violation');error.winerror=32
                 raise error
             return original(path,*args,**kwargs)
-        with patch.object(workflow,'cancellable_copy',side_effect=primary),patch.object(Path,'unlink',locked), \
+        with patch.object(media_export,'cancellable_copy',side_effect=primary),patch.object(Path,'unlink',locked), \
                 patch.object(self.stop,'wait',return_value=False),patch.object(workflow,'emit') as emit:
             with self.assertRaises(OSError) as raised:
                 workflow.export_video(self.campaign,self.stop,draft=True)
@@ -936,9 +941,9 @@ class DraftVideoTests(unittest.TestCase):
                 self.stop.clear()
                 with ExitStack() as stack:
                     stack.enter_context(patch.object(Path,'unlink',locked))
-                    stack.enter_context(patch.object(workflow,'emit',side_effect=BrokenPipeError('warning unavailable')))
+                    stack.enter_context(patch.object(media_export,'_emit',side_effect=BrokenPipeError('warning unavailable')))
                     if kind=='cancelled':
-                        stack.enter_context(patch.object(workflow,'cancellable_copy',side_effect=cancelled_copy))
+                        stack.enter_context(patch.object(media_export,'cancellable_copy',side_effect=cancelled_copy))
                     else:
                         stack.enter_context(patch.object(workflow.os,'rename',side_effect=primary))
                         stack.enter_context(patch.object(self.stop,'wait',return_value=False))

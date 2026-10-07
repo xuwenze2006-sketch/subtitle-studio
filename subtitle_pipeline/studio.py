@@ -32,6 +32,7 @@ from .export_progress import sanitize_export_progress
 from .languages import default_target, output_names, manifest_languages, video_output_path
 from .read_cache import SrtReadCache
 from .studio_http import StudioHTTPServer as ThreadingHTTPServer, static_file_path
+from .studio_origin import create_server
 from .runner import PipelineConfig, ProjectLock, atomic_json, engine_paths, pid_alive, run_pipeline, validate_config
 from .subtitles import parse_srt
 from .windows_job import owned_process, wait_for_process_exit
@@ -407,6 +408,12 @@ class StudioController:
             result.append({**item,'missing':missing})
         return result
 
+    def progress(self):
+        """Frequent progress updates only copy owned memory, never project files."""
+        with self.lock:
+            return {'project_id':self._project_id(),'source':self.source,'campaign':self.campaign,
+                    'job':deepcopy(self.job),'persistence_warning':self.persistence_warning}
+
     def state(self):
         # State polling has no project token. Retry one changed selection so a
         # normal project switch does not appear to the UI as a lost connection.
@@ -727,7 +734,8 @@ class StudioController:
                     **({'language':data.get('language',state['project_config'].get('language','ja')),
                         'target':data.get('target',state['project_config'].get('target',default_target(data.get('language','ja'))))} if action=='prepare' else {}),
                     reviewed=data.get('reviewed'),timing_passed=data.get('timing_passed'),content_passed=data.get('content_passed',False),
-                    executable=sys.executable)
+                    executable=sys.executable,
+                    encoder=data.get('encoder') if action in ('export','export-draft') else None)
             self.stop_event=threading.Event()
             self._cancel_marker=(self.state_path.parent/'stops'/(secrets.token_hex(16)+'.stop')) if action!='local' else None
             self.job={**self._idle_job(),'busy':True,'action':action,'status':'starting','message':'正在准备任务…'}
@@ -1010,6 +1018,11 @@ class StudioController:
         if output!=expected or not output.is_file():return None
         return output if self._video_matches(output,manifest['output_sha256']) else None
 
+    def environment(self):
+        # Explicit, bounded local probes do not occupy the task control lock.
+        from .environment import probe_environment
+        return probe_environment()
+
     def preview(self,sample=None,project_id=None):
         return self._read_view(lambda view:view._preview_data(sample),project_id)
 
@@ -1165,14 +1178,23 @@ class StudioController:
 
     def review_cue(self,data):
         from .manual_review import save_review
+        mode=data.get('response_mode','preview')
+        if mode not in ('preview','cue'):raise ValueError('校对返回方式无效')
         with self.lock:
             project,selected=self._review_selection_for_write(data)
             language,target=self._selection_languages(selected)
             with ExitStack() as locks:
                 locks.enter_context(ProjectLock(project))
                 if selected['folder']!=project:locks.enter_context(ProjectLock(selected['folder']))
-                save_review(selected['folder'],{key:value for key,value in data.items() if key not in ('project_id','sample')},
+                review=save_review(selected['folder'],{key:value for key,value in data.items() if key not in ('project_id','sample','response_mode')},
                             language=language,target=target)
+            if mode=='cue':
+                cue=review['cues'][data['cue_id']-1]
+                return {'kind':'review-cue','project_id':self._project_id(),'selected_id':selected['id'],
+                        'base_revision':data['expected_revision'],
+                        'cue':{**cue,'ja':cue['source_text'],'zh':cue['target_text']},
+                        'manual_review':{'supported':True,'revision':review['revision'],'summary':review['summary']},
+                        'exported_video':None,'draft_video':None}
             return self._preview_data(selected['id'])
 
     def review_accept(self,data):
@@ -1274,6 +1296,8 @@ def make_handler(controller,token,host,static_dir):
                     sample=query.get('sample',[None])[0]
                     project_id=query.get('project',[None])[0]
                     if path=='/api/state':return self.json_response(controller.state())
+                    if path=='/api/progress':return self.json_response(controller.progress())
+                    if path=='/api/environment':return self.json_response(controller.environment())
                     if path=='/api/preview':return self.json_response(controller.preview(sample,project_id))
                     if path=='/api/media':
                         return self.file_response(controller.media_path(sample,project_id))
@@ -1385,7 +1409,8 @@ def main(argv=None):
             return 0
         controller=StudioController(source=args.source,campaign=args.campaign,baseline=args.baseline)
         token=secrets.token_urlsafe(32)
-        server=ThreadingHTTPServer(('127.0.0.1',args.port),BaseHTTPRequestHandler)
+        server,origin_warning=create_server(ThreadingHTTPServer,BaseHTTPRequestHandler,
+                                           data_directory()/'browser-port.json',port=args.port)
         host=f'127.0.0.1:{server.server_port}'
         server.RequestHandlerClass=make_handler(controller,token,host,static)
         server.last_touch=time.monotonic()
@@ -1394,6 +1419,8 @@ def main(argv=None):
         # Explicit launch selections must survive a restart even if no UI
         # action occurs. Constructors and reused instances remain read-only.
         if any((args.source,args.campaign,args.baseline)):controller._persist()
+        if origin_warning:
+            controller.persistence_warning='；'.join(filter(None,(controller.persistence_warning,origin_warning)))
     if sys.stdout:print(json.dumps({'url':url,'pid':os.getpid()},ensure_ascii=False),flush=True)
     if not args.no_browser:open_desktop_window(url)
     def idle_shutdown():

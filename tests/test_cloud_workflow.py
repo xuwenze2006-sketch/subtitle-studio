@@ -10,6 +10,7 @@ import threading
 from unittest.mock import Mock, patch
 
 from subtitle_pipeline import cloud_workflow as workflow
+from subtitle_pipeline import media_export
 from subtitle_pipeline.subtitles import Cue, parse_srt, render_srt
 
 
@@ -598,8 +599,9 @@ class WorkflowRegressionTests(unittest.TestCase):
         self.approve_final_fixture()
         info = {'streams': [{'codec_type': 'video', 'width': 640, 'height': 480,
                              'r_frame_rate': '25/1', 'nb_frames': '2500'}], 'format': {'duration': '100'}}
-        patch.object(workflow, 'media_info', return_value=info).start()
-        patch.object(workflow, 'audio_digest', return_value='SHA256=matching-audio').start()
+        patch.object(media_export, 'media_info', return_value=info).start()
+        patch.object(media_export.environment, 'select_encoder', return_value='qsv').start()
+        patch.object(media_export, 'audio_digest', return_value='SHA256=matching-audio').start()
         self.media = patch.object(workflow.r, 'run_process', side_effect=self.fake_media).start()
         return workflow.video_output_path(self.source,target)
 

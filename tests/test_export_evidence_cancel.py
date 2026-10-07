@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from subtitle_pipeline import cloud_workflow as workflow
+from subtitle_pipeline import media_export
 from subtitle_pipeline import runner
 from tests import test_draft_video as draft_fixture
 from tests.test_cloud_workflow import write_complete_qwen_evidence
@@ -85,7 +86,7 @@ class ExportEvidenceCancellationTests(unittest.TestCase):
                 f.stop.clear()
                 f.encoder.reset_mock()
                 with patch.object(workflow, 'sample_state_evidence', side_effect=finish_then_stop), \
-                     patch.object(workflow, 'media_info', side_effect=AssertionError('no media after cancel')):
+                     patch.object(media_export, 'media_info', side_effect=AssertionError('no media after cancel')):
                     with self.assertRaises(runner.Cancelled):
                         workflow.export_video(f.campaign, f.stop, draft=draft)
                 f.encoder.assert_not_called()
@@ -132,7 +133,7 @@ class ExportEvidenceCancellationTests(unittest.TestCase):
             return stream
 
         with patch.object(Path, 'open', new=open_source), \
-             patch.object(workflow, 'media_info', side_effect=AssertionError('no media after cancel')):
+             patch.object(media_export, 'media_info', side_effect=AssertionError('no media after cancel')):
             with self.assertRaises(runner.Cancelled):
                 workflow.export_video(f.campaign, f.stop, draft=True)
         self.assertEqual(len(opened), 1)

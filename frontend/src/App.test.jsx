@@ -74,6 +74,7 @@ function server(initial = state(), custom) {
     vi.fn(async (url, options = {}) => {
       const body = options.body ? JSON.parse(options.body) : null;
       requests.push({ url, options, body });
+      if (url === '/api/environment') return respond({version:1,checks:{},export_ready:false,recommended_encoder:null});
       const result = await custom?.(url, body, snapshot);
       if (result) return respond(result.body, result.status);
       if (url === "/api/state") return respond(snapshot);

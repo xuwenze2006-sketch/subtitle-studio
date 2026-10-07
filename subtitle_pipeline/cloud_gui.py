@@ -41,7 +41,7 @@ def validate_review(reviewed, timing_passed, content_passed) -> tuple[int, int]:
 
 def build_command(action, *, campaign, source=None, baseline=None, reviewed=None,
                   timing_passed=None, content_passed=False, executable=None,
-                  language=None,target=None) -> list[str]:
+                  language=None,target=None,encoder=None) -> list[str]:
     if action not in _ACTIONS or campaign is None or not str(campaign).strip():
         raise ValueError('请选择有效操作和项目目录。')
     if action == 'siliconflow-pilot':
@@ -67,6 +67,9 @@ def build_command(action, *, campaign, source=None, baseline=None, reviewed=None
         if content_passed is not True:
             raise ValueError('请先完成最终抽检并明确确认通过。')
         command.append('--content-passed')
+    if encoder is not None:
+        if encoder not in ('auto','qsv','cpu'):raise ValueError('视频编码方式无效')
+        if action in ('export','export-draft'):command += ['--encoder',encoder]
     return command
 
 

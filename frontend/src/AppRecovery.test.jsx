@@ -30,6 +30,7 @@ function server() {
   vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
     const body = options.body && JSON.parse(options.body);
     service.calls.push({ url, body });
+    if (url === '/api/environment') return respond({version:1,checks:{},export_ready:false,recommended_encoder:null});
     if (url === "/api/state") {
       const delayed = service.nextStateRead;
       service.nextStateRead = null;
@@ -109,13 +110,18 @@ describe("原校对任务的恢复与提交保护", () => {
     await detach(service);
     service.review = { ...review, cues: [{ ...review.cues[0], target_text: "其他窗口保存的译文" }], manual_review: { ...review.manual_review, revision: "r2" } };
     await click("恢复原校对任务");
+    expect(screen.getByRole("button", { name: "保存修改" })).toBeDisabled();
+    expect(screen.getByText(/草稿基准版本已变化/)).toBeInTheDocument();
     await click("保存修改");
-    expect(screen.getByRole("alert")).toHaveTextContent("校对版本冲突");
+    expect(service.calls.filter(call => call.url === "/api/review-cue")).toHaveLength(0);
     expect(screen.getByLabelText("译文（中文）")).toHaveValue("尚未保存的译文");
     expect(service.review.cues[0].target_text).toBe("其他窗口保存的译文");
     await click("刷新核对状态");
+    expect(screen.getByLabelText("译文（中文）")).toHaveValue("尚未保存的译文");
+    expect(screen.getByRole("button", { name: "保存修改" })).toBeEnabled();
     await click("保存修改");
-    expect(service.calls.filter(call => call.url === "/api/review-cue").map(call => call.body.expected_revision)).toEqual(["r1", "r2"]);
+    expect(service.calls.filter(call => call.url === "/api/review-cue").map(call => call.body.expected_revision)).toEqual(["r2"]);
+    expect(service.review.cues[0].target_text).toBe("尚未保存的译文");
     expect(warnsOnExit()).toBe(false);
   });
 

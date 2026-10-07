@@ -22,6 +22,9 @@ import CueTimeline from "./CueTimeline";
 import CueLocator from "./CueLocator";
 import ManualReview, { createReviewDraft, isReviewDirty, parseReviewTime } from "./ManualReview";
 import { getReviewSubmissions, hasPendingReviewSubmissions, matchesSubmittedDraft, matchesSubmittedFields } from "./reviewSubmissions";
+import { applyReviewReceipt } from './reviewReceipt';
+import { createCuePlaybackIndex } from './cuePlaybackIndex';
+import { readReviewDraft, writeReviewDraft, clearReviewDraft } from "./reviewDraftStorage";
 import "./preview-ux.css";
 import "./review-layout.css";
 import "./file-layout.css";
@@ -86,9 +89,41 @@ function PreviewSession({
   const [reviewError, setReviewError] = useState("");
   const [reviewConflict, setReviewConflict] = useState("");
   const [reviewNotice, setReviewNotice] = useState("");
+  const [draftStorageWarning, setDraftStorageWarning] = useState("");
+  const reviewDraftRef = useRef(reviewDraft);
   const selectedId = preview?.selected_id || selection || selections[0]?.id || "main";
   const reviewBusy = reviewActionBusy || reviewSubmissions.pending(selectedId);
   const reviewDirty = isReviewDirty(reviewDraft);
+  useLayoutEffect(() => {
+    const previous = reviewDraftRef.current;
+    reviewDraftRef.current = reviewDraft;
+    // Typing all fields back to their originals is still a new editor state;
+    // retain that state instead of resurrecting the last intermediate edit.
+    const returnedToInitial = !!reviewDraft && isReviewDirty(previous) &&
+      reviewDraft.cueId === previous.cueId && reviewDraft.sample === previous.sample &&
+      reviewDraft.revision === previous.revision && reviewDraft.initial === previous.initial;
+    if (!isReviewDirty(reviewDraft) && !returnedToInitial) return;
+    // Persist the committed edit immediately, including the final keystroke
+    // before a refresh or layout unmount. Storage failure never blocks editing.
+    const stored = writeReviewDraft(projectKey, reviewDraft);
+    setDraftStorageWarning(stored.error === "draft-conflict"
+      ? "其他窗口已更新本机草稿，本窗口的输入仍保留，请先保存本句修改。"
+      : stored.error ? "本机草稿暂时无法保存，刷新前请先保存本句修改。" : "");
+  }, [projectKey, reviewDraft]);
+  const restoreReviewDraft = useCallback(data => {
+    const current = reviewDraftRef.current;
+    if (!data.manual_review?.supported || isReviewDirty(current)) return;
+    const recovered = readReviewDraft(projectKey, data.selected_id);
+    setDraftStorageWarning(recovered.error ? "本机草稿读取失败，当前编辑和保存仍可继续。" : "");
+    if (recovered.draft) {
+      setReviewDraft(recovered.draft);
+      setReviewNotice(isReviewDirty(recovered.draft) ? "已恢复本机未保存草稿，请核对后保存。"
+        : "已恢复本机校对草稿，请核对当前保存内容。");
+    } else if (current?.sample === data.selected_id) {
+      const cue = data.cues.find(item => item.id === current.cueId);
+      setReviewDraft(cue ? createReviewDraft(cue, data.manual_review.revision, data.selected_id) : null);
+    }
+  }, [projectKey]);
   useEffect(() => {
     const preventDraftLoss = event => {
       if (!reviewDirty && !hasPendingReviewSubmissions(submissionOwner)) return;
@@ -161,11 +196,7 @@ function PreviewSession({
           }
           setPreview(data);
           setSelections(data.selections || []);
-          setReviewDraft(current => {
-            if (!current || isReviewDirty(current) || current.sample !== data.selected_id || !data.manual_review?.supported) return current;
-            const cue = data.cues.find(item => item.id === current.cueId);
-            return cue ? createReviewDraft(cue, data.manual_review.revision, data.selected_id) : null;
-          });
+          restoreReviewDraft(data);
         }
       })
       .catch((error) => {
@@ -190,17 +221,34 @@ function PreviewSession({
     revision,
     selection,
     onError,
+    restoreReviewDraft,
   ]);
-  const cues = useMemo(() => (preview?.cues || []).map(cue=>({...cue,ja:cue.source_text ?? cue.ja,zh:cue.target_text ?? cue.zh})), [preview?.cues]);
-  const indexedCues = useMemo(() => cues.map((cue, index) => ({cue, index,
-    search: `${cue.ja || ""}\n${cue.zh || ""}`.normalize("NFKC").toLocaleLowerCase(),
-  })), [cues]);
+  const cueViews=useRef(new WeakMap()), searchEntries=useRef(new WeakMap());
+  const cues = useMemo(() => (preview?.cues || []).map(cue=>{
+    if(!cueViews.current.has(cue)) cueViews.current.set(cue,{...cue,ja:cue.source_text ?? cue.ja,zh:cue.target_text ?? cue.zh});
+    return cueViews.current.get(cue);
+  }), [preview?.cues]);
+  const indexedCues = useMemo(() => cues.map((cue, index) => {
+    const previous=searchEntries.current.get(cue);
+    if(previous?.index===index) return previous;
+    const entry={cue,index,search:`${cue.ja || ""}\n${cue.zh || ""}`.normalize("NFKC").toLocaleLowerCase()};
+    searchEntries.current.set(cue,entry);
+    return entry;
+  }), [cues]);
+  const playbackIndex=useMemo(()=>createCuePlaybackIndex(cues),[cues]);
   const languageLabels={ja:'日语',en:'英语',zh:'中文','zh-CN':'中文',auto:'自动检测'};
   const supportsReview = !!preview?.manual_review?.supported;
+  const activeReviewDraft = reviewDraft?.sample === selectedId ? reviewDraft : null;
+  const missingDraftCue = supportsReview && !!activeReviewDraft && !cues.some(cue => cue.id === activeReviewDraft.cueId);
+  const draftConflict = !supportsReview || !activeReviewDraft ? "" : missingDraftCue
+    ? "草稿对应的原句已不存在，内容已保留，请复制需要的内容或放弃草稿"
+    : activeReviewDraft.revision !== preview.manual_review.revision
+      ? "草稿基准版本已变化，输入已保留" : "";
   useLayoutEffect(() => {
     if (sessionMemory) sessionMemory.current = { projectKey, selection: preview?.selected_id || selection, time, query, rate, followPlayback, timelineMemory, reviewDraft, reviewFilter };
   }, [sessionMemory, projectKey, preview?.selected_id, selection, time, query, rate, followPlayback, timelineMemory, reviewDraft, reviewFilter]);
   useEffect(() => {
+    if(reviewSubmissions.peekResult(selectedId)?.data?.kind==='review-cue' && !preview) return;
     const submission = reviewSubmissions.takeResult(selectedId);
     if (!submission) return;
     const advance = advanceAfterSave.current;
@@ -216,7 +264,14 @@ function PreviewSession({
     ++requestVersion.current;
     setLoading(false);
     setLoadFailed(false);
-    const data = submission.data;
+    let data;
+    try { data=applyReviewReceipt(preview,submission.data,submission); }
+    catch(error) {
+      setReviewError(error.message);
+      setReviewConflict('本次修改已保存，输入已保留，请刷新核对状态后对照最新内容。');
+      void refreshTaskState('本句修改已保存');
+      return;
+    }
     const savedCueIndex = data.cues.findIndex(cue => cue.id === submission.cueId);
     const shouldAdvance = advance?.sample === selectedId && advance.cueId === submission.cueId &&
       advance.revision === submission.revision && matchesSubmittedFields(reviewDraft, submission) &&
@@ -226,6 +281,17 @@ function PreviewSession({
     const nextEntry = unchecked.find(({index}) => index > savedCueIndex) || unchecked[0];
     setPreview(data);
     setSelections(data.selections || []);
+    if (matchesSubmittedFields(reviewDraft, submission)) {
+      // Another window may have replaced this segment's persisted draft after
+      // our submission. A receipt confirms only the fields that were sent.
+      const persisted = readReviewDraft(projectKey, submission.sample, { observe: false });
+      if (persisted.error) setDraftStorageWarning("本句已保存，但本机草稿暂时无法确认清除。");
+      else if (!persisted.draft || matchesSubmittedFields(persisted.draft, submission)) {
+        const cleared = clearReviewDraft(projectKey, submission.sample);
+        setDraftStorageWarning(cleared.error === "draft-conflict" ? "本句已保存；其他窗口的草稿已保留。"
+          : cleared.error ? "本句已保存，但本机草稿暂时无法清除。" : "");
+      } else setDraftStorageWarning("本句已保存；其他窗口的草稿已保留。");
+    }
     setReviewDraft(current => {
       if (shouldAdvance && nextEntry) return createReviewDraft(nextEntry.cue, data.manual_review.revision, selectedId);
       if (!matchesSubmittedDraft(current, submission)) return current;
@@ -254,7 +320,7 @@ function PreviewSession({
       ? nextEntry ? "本句已保存，已定位下一条未检查字幕。" : "本句已保存，当前片段没有未检查字幕。"
       : matchesSubmittedFields(reviewDraft, submission) ? "本句修改与核对状态已保存。" : "本次提交已保存；之后的修改仍需保存。");
     void refreshTaskState("本句修改已保存");
-  }, [reviewSubmissions, submissionVersion, selectedId, refreshTaskState, reviewDraft]);
+  }, [reviewSubmissions, submissionVersion, selectedId, refreshTaskState, reviewDraft, preview, projectKey]);
   const offset = Number(preview?.offset_ms) || 0;
   const canPlay = !!preview?.media_available && !mediaFailed && !loading;
   const searchText = query.trim().normalize("NFKC").toLocaleLowerCase();
@@ -270,11 +336,7 @@ function PreviewSession({
       if (index >= 0) setLocateRequest({ index });
     }
   };
-  const active = cues.findIndex(
-    (cue) => time >= cue.start_ms && time < cue.end_ms,
-  );
-  const previous = active >= 0 ? active - 1 : cues.findLastIndex((cue) => cue.start_ms < time);
-  const next = active >= 0 ? (active + 1 < cues.length ? active + 1 : -1) : cues.findIndex((cue) => cue.start_ms > time);
+  const {active,previous,next}=playbackIndex.at(time);
   const replayCue = (completedReplay && (completedReplay.cueId == null
     ? cues[completedReplay.index] : cues.find(cue => cue.id === completedReplay.cueId))) ||
     cues[active >= 0 ? active : recentCue];
@@ -305,6 +367,7 @@ function PreviewSession({
     setReviewError("");
     setReviewConflict("");
     setReviewNotice("");
+    setDraftStorageWarning("");
     setPreview(null);
     setQuery("");
     setFollowPlayback(true);
@@ -477,6 +540,9 @@ function PreviewSession({
   };
   const discardReviewDraft = () => {
     const cue = cues.find(item => item.id === reviewDraft?.cueId);
+    const cleared = clearReviewDraft(projectKey, reviewDraft?.sample || selectedId);
+    setDraftStorageWarning(cleared.error === "draft-conflict" ? "已放弃当前输入；其他窗口的本机草稿已保留。"
+      : cleared.error ? "已放弃当前输入，但本机草稿暂时无法清除。" : "");
     setReviewDraft(cue ? createReviewDraft(cue, preview.manual_review.revision, selectedId) : null);
     setReviewError("");
     setReviewNotice("");
@@ -524,7 +590,7 @@ function PreviewSession({
     void replay({ ...cue, ...range });
   };
   const saveReviewCue = (status, { advance = false } = {}) => {
-    if (!supportsReview || !reviewDraft || disabled || loading || reviewBusy || snapshot?.job?.busy || reviewConflict || preview.manual_review.conflict) return;
+    if (!supportsReview || !reviewDraft || disabled || loading || reviewBusy || snapshot?.job?.busy || reviewConflict || draftConflict || preview.manual_review.conflict) return;
     const fields = reviewDraft.fields;
     const range = reviewTimeRange(fields);
     if (!range) return;
@@ -538,13 +604,13 @@ function PreviewSession({
     ++taskRefreshRequest.current;
     setReviewError("");
     setReviewNotice("");
-    const submitted = reviewSubmissions.submit(selectedId, reviewDraft, () => api.request("/api/review-cue", { project_id: preview.project_id, sample: selectedId, expected_revision: reviewDraft.revision,
+    const submitted = reviewSubmissions.submit(selectedId, reviewDraft, () => api.request("/api/review-cue", { project_id: preview.project_id, sample: selectedId, response_mode:'cue', expected_revision: reviewDraft.revision,
         cue_id: reviewDraft.cueId, start_ms: start, end_ms: end, source_text: fields.source_text, target_text: fields.target_text,
         review_status: finalStatus, note: fields.note, translation_confirmed: fields.translation_confirmed }));
     if (submitted) advanceAfterSave.current = advance ? {sample:selectedId, cueId:reviewDraft.cueId, revision:reviewDraft.revision} : null;
   };
   const acceptReview = async () => {
-    if (!supportsReview || selectedId !== "main" || disabled || loading || reviewBusy || reviewDirty || snapshot?.job?.busy || reviewConflict || !preview.manual_review.summary?.can_accept) return;
+    if (!supportsReview || selectedId !== "main" || disabled || loading || reviewBusy || reviewDirty || snapshot?.job?.busy || reviewConflict || draftConflict || !preview.manual_review.summary?.can_accept) return;
     const version = requestVersion.current;
     ++taskRefreshRequest.current;
     setReviewBusy(true);
@@ -789,11 +855,20 @@ function PreviewSession({
                 {loadFailed ? "点击上方“刷新结果”重新读取。" : cues.length ? reviewFilter !== "all" ? "切换核对状态筛选，或清空搜索查看其他字幕。" : "换一个关键词，或清空搜索查看全部字幕。" : "完成识别后，在这里逐句核对文字和时间轴。"}
               </Empty>
           </CueTimeline>
-          {supportsReview && <ManualReview preview={preview} selectedId={selectedId} draft={reviewDraft?.sample === selectedId ? reviewDraft : null}
+          {supportsReview && draftStorageWarning && <p className="manual-review-warning">{draftStorageWarning}</p>}
+          {missingDraftCue && <section className="manual-review" aria-label="恢复的草稿内容">
+            <h3>恢复的草稿内容</h3>
+            <p>{activeReviewDraft.fields.start} → {activeReviewDraft.fields.end}</p>
+            <label>草稿原文<textarea rows={3} readOnly value={activeReviewDraft.fields.source_text} /></label>
+            <label>草稿译文<textarea rows={3} readOnly value={activeReviewDraft.fields.target_text} /></label>
+            <label>草稿核对备注<textarea rows={2} readOnly value={activeReviewDraft.fields.note} /></label>
+            <Button onClick={discardReviewDraft} disabled={reviewBusy}>放弃未保存修改</Button>
+          </section>}
+          {supportsReview && <ManualReview preview={preview} selectedId={selectedId} draft={activeReviewDraft}
             onDraftChange={setReviewDraft} onDiscard={discardReviewDraft} onSave={saveReviewCue} onRefresh={refreshReview} onAccept={acceptReview} onNext={nextUnchecked}
             onListen={listenReviewCue} canListen={canPlay}
             disabled={disabled || loading || !!snapshot?.job?.busy} busy={reviewBusy} error={reviewError}
-            conflict={reviewConflict || preview.manual_review.conflict} notice={reviewNotice} />}
+            conflict={reviewConflict || draftConflict || preview.manual_review.conflict} notice={reviewNotice} />}
         </section>
       </div>
       {!compact && draftExport}
