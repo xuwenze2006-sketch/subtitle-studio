@@ -1,0 +1,58 @@
+name: Verify Windows application
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: "1"
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.19.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Check patch whitespace
+        run: git diff-tree --check --root -r -m HEAD
+      - name: Offline backend tests
+        run: python tests/run_offline.py
+      - name: Loopback HTTP and Windows credential storage
+        run: python tests/studio_http_smoke.py
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-fund --no-audit
+      - name: Frontend tests
+        working-directory: frontend
+        run: npm test -- --reporter=dot
+      - name: Rebuild bundled frontend
+        working-directory: frontend
+        run: npm run build
+      - name: Verify bundled assets match source
+        shell: pwsh
+        run: |
+          git diff --exit-code -- frontend/dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $unexpectedAssets = @(git ls-files --others --exclude-standard -- frontend/dist)
+          if ($unexpectedAssets.Count -ne 0) {
+            throw "Build produced untracked assets; rebuild and commit frontend/dist."
+          }

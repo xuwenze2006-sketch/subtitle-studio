@@ -1,0 +1,181 @@
+/* Both layouts share playback state; every visual rule stays within Preview. */
+.preview-content:is(.preview-review, .preview-workbench) { min-width: 0; }
+.preview-content .cue-follow-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 10px; padding: 0 16px 10px; }
+.preview-content .cue-follow-controls > span { color: #697b87; font-size: 11px; }
+.preview-content .cue-follow-controls .button { padding: 6px 9px; font-size: 12px; min-height: 32px; }
+.preview-content.preview-review .cue-follow-controls > span { color: #a6b9c7; }
+.preview-content:is(.preview-review, .preview-workbench) .preview-toolbar {
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.preview-content:is(.preview-review, .preview-workbench) .preview-context { flex: 1; gap: 9px; }
+.preview-content:is(.preview-review, .preview-workbench) .preview-toolbar-actions { flex-wrap: wrap; gap: 7px; }
+.preview-content:is(.preview-review, .preview-workbench) .preview-source-name { max-width: 250px; }
+.preview-content:is(.preview-review, .preview-workbench) .preview-selection { min-width: 0; }
+.preview-content:is(.preview-review, .preview-workbench) .preview-selection select {
+  min-height: 34px;
+  max-width: 210px;
+  padding: 6px 26px 6px 10px;
+}
+.preview-content:is(.preview-review, .preview-workbench) .card { min-width: 0; }
+.preview-content:is(.preview-review, .preview-workbench) .player-card { padding: 0; }
+.preview-content:is(.preview-review, .preview-workbench) .player-stage { width: 100%; }
+.preview-content:is(.preview-review, .preview-workbench) .cue-card { padding: 16px 0 0; }
+.preview-content:is(.preview-review, .preview-workbench) .button { min-height: 34px; font-size: 12px; }
+.preview-content:is(.preview-review, .preview-workbench) .button > svg { flex-shrink: 0; }
+.preview-content:is(.preview-review, .preview-workbench) .downloads .button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.preview-content:is(.preview-review, .preview-workbench) .cue-row time { display: block; line-height: 1.6; }
+.preview-content:is(.preview-review, .preview-workbench) .cue-original,
+.preview-content:is(.preview-review, .preview-workbench) .cue-translation { font-size: 14px; }
+.preview-content:is(.preview-review, .preview-workbench) .cue-list {
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  overflow-anchor: none;
+  contain: layout paint;
+}
+
+/* Full review: quiet charcoal surfaces, restrained teal cues and controls. */
+.preview-content.preview-review {
+  --primary: #39c6b0;
+  --primary-hover: #67ddc9;
+  --line: #33414e;
+  color-scheme: dark;
+  color: #e5edf2;
+  background: #151d25;
+}
+.preview-content.preview-review:focus-visible { outline-color: #50d1bd; }
+.preview-content.preview-review .preview-layout {
+  grid-template-columns: minmax(0, 55fr) minmax(0, 45fr);
+  gap: 18px;
+  align-items: start;
+}
+.preview-content.preview-review .card {
+  background: #1d2731;
+  border-color: #33414e;
+  box-shadow: none;
+  border-radius: 11px;
+}
+.preview-content.preview-review .player-card { position: sticky; top: 18px; }
+.preview-content.preview-review .player-stage { aspect-ratio: 16 / 9; min-height: 220px; background: #0d1319; }
+.preview-content.preview-review .player-stage video { background: #0d1319; }
+.preview-content.preview-review .player-info { padding: 14px 16px 11px; }
+.preview-content.preview-review .preview-playback-controls { padding: 0 16px 12px; gap: 8px; }
+.preview-content.preview-review .preview-shortcuts { margin: 0 16px 10px; font-size: 11px; }
+.preview-content.preview-review .player-caption { padding: 0 16px 15px; }
+.preview-content.preview-review .downloads { padding: 14px 16px; }
+.preview-content.preview-review .downloads h3 { margin-bottom: 9px; color: #bdcbd5; }
+.preview-content.preview-review .cue-card h2 { color: #e5edf2; font-size: 14px; }
+.preview-content.preview-review .cue-list { height: 60vh; min-height: 280px; max-height: 720px; border-color: #33414e; }
+.preview-content.preview-review .cue-row { background: #1d2731; border-bottom-color: #303d49; }
+.preview-content.preview-review .cue-row:hover:not(.active-cue) { background: #25333d; }
+.preview-content.preview-review .cue-row.active-cue { background: #203c3e; border-left-color: #50d1bd; }
+.preview-content.preview-review .cue-index { color: #899da9; }
+.preview-content.preview-review .active-cue .cue-index { color: #69dbc8; }
+.preview-content.preview-review .cue-original { color: #e0e8ee; }
+.preview-content.preview-review .cue-translation { color: #b1cac7; }
+.preview-content.preview-review .cue-row time { color: #92b5bf; font-size: 11px; }
+.preview-content.preview-review .cue-row time span { color: #91a4af; }
+.preview-content.preview-review .cue-replay { background: #24333e; color: #70dcc9; border-color: #3b535e; }
+.preview-content.preview-review .cue-replay:hover:not(:disabled) { background: #2a4b4d; border-color: #5dd4c0; }
+.preview-content.preview-review .cue-replay:disabled { color: #92a5b2; opacity: 1; border-color: #3c4955; }
+.preview-content.preview-review .button-secondary { background: #28343f; border-color: #40505e; color: #d5e0e7; box-shadow: none; }
+.preview-content.preview-review .button-secondary:hover:not(:disabled) { background: #324650; border-color: #62b6ad; color: #e9fffa; }
+.preview-content.preview-review .button-primary { color: #082f2b; box-shadow: none; }
+.preview-content.preview-review .button:disabled { color: #94a5b3; background: #28323c; border-color: #3d4a56; opacity: 1; }
+.preview-content.preview-review input,
+.preview-content.preview-review select { background: #17222c; color: #dae6ed; border-color: #415462; }
+.preview-content.preview-review input::placeholder { color: #8fa2b0; opacity: 1; }
+.preview-content.preview-review input:disabled,
+.preview-content.preview-review select:disabled { color: #99aab7; opacity: 1; }
+.preview-content.preview-review input:focus,
+.preview-content.preview-review select:focus { border-color: #50d1bd; box-shadow: 0 0 0 3px #50d1bd24; }
+.preview-content.preview-review .preview-search { color: #9aafbc; }
+.preview-content.preview-review .preview-search > button { color: #bad0da; }
+.preview-content.preview-review .preview-search > button:hover { background: #344a55; }
+.preview-content.preview-review .preview-shortcuts kbd { color: #ccd8e1; background: #263540; border-color: #425460; }
+.preview-content.preview-review .badge { color: #bbcbd5; background: #2b3a46; border-color: #405260; }
+.preview-content.preview-review .badge-primary { color: #77decf; background: #21443f; }
+.preview-content.preview-review .badge-warning { color: #efd097; background: #4a3d27; }
+.preview-content.preview-review .preview-download-receipt { color: #76dbc4; }
+.preview-content.preview-review .preview-context > .preview-source-name,
+.preview-content.preview-review .preview-selection,
+.preview-content.preview-review .preview-rate,
+.preview-content.preview-review .preview-loading,
+.preview-content.preview-review .preview-shortcuts,
+.preview-content.preview-review .player-caption,
+.preview-content.preview-review .section-meta,
+.preview-content.preview-review .preview-export-card p,
+.preview-content.preview-review .section-heading p { color: #a6b9c7; }
+.preview-content.preview-review .player-info svg,
+.preview-content.preview-review .cue-card h2 svg { color: #71c6bb; }
+.preview-content.preview-review .empty-state h3 { color: #d5e0e7; }
+.preview-content.preview-review .empty-state p,
+.preview-content.preview-review .player-stage .empty-state p { color: #a8bdcb; }
+.preview-content.preview-review .empty-icon { color: #8cabb9; background: #2a3b47; }
+.preview-content.preview-review .notice { background: #243540; border-color: #405967; color: #bcd1de; }
+.preview-content.preview-review .notice-warning { background: #3b3427; border-color: #67583b; color: #e8ce9f; }
+.preview-content.preview-review .notice-error { background: #412f35; border-color: #754752; color: #efbdc7; }
+.preview-content.preview-review .preview-export-card { margin-top: 18px; padding: 16px 18px; }
+.preview-content.preview-review .audition-card { margin-top: 18px; }
+.preview-content.preview-review .audition-list article { background: #18232c; border-color: #354650; }
+.preview-content.preview-review .audition-list h3 { color: #bad3df; }
+.preview-content.preview-review .audition-list p { color: #c0ccd6; }
+.preview-content.preview-review .preview-review-note { background: #1d2b35; border-color: #344957; padding: 16px 18px; }
+.preview-content.preview-review .preview-review-note strong { color: #bdd3dd; }
+.preview-content.preview-review .preview-review-note p { color: #a4b9c7; }
+
+/* Workspace: a compact media stack leaves the task controls in view. */
+.preview-content.preview-workbench .preview-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.preview-content.preview-workbench .preview-toolbar { margin-bottom: 10px; }
+.preview-content.preview-workbench .preview-source-name { display: none; }
+.preview-content.preview-workbench .preview-selection select { min-width: 100px; max-width: 160px; }
+.preview-content.preview-workbench .player-stage { aspect-ratio: 16 / 9; min-height: 160px; max-height: 310px; }
+.preview-content.preview-workbench .player-stage video { max-height: 310px; }
+.preview-content.preview-workbench .player-info { padding: 11px 14px 9px; }
+.preview-content.preview-workbench .preview-playback-controls { padding: 0 14px 11px; gap: 8px; }
+.preview-content.preview-workbench .preview-transport { gap: 5px; }
+.preview-content.preview-workbench .preview-playback-controls .button { padding: 6px 8px; }
+.preview-content.preview-workbench .player-caption { padding: 0 14px 12px; color: #697b87; }
+.preview-content.preview-workbench .downloads { padding: 11px 14px; }
+.preview-content.preview-workbench .downloads h3 { display: none; }
+.preview-content.preview-workbench .cue-list { height: auto; max-height: 220px; border-color: #e8eef0; overscroll-behavior-y: auto; }
+.preview-content.preview-workbench .cue-list > .empty-state { min-height: 140px; padding: 20px 16px; }
+.preview-content.preview-workbench .cue-list .empty-icon { display: none; }
+.preview-content.preview-workbench .cue-card { padding-top: 12px; }
+.preview-content.preview-workbench .cue-card > .section-heading { margin-bottom: 10px; padding-inline: 14px; }
+.preview-content.preview-workbench .preview-search { margin: 0 14px 11px; }
+.preview-content.preview-workbench .cue-seek { padding: 11px 8px 11px 14px; }
+.preview-content.preview-workbench .active-cue .cue-seek { padding-left: 11px; }
+.preview-content.preview-workbench .cue-row.active-cue { background: #edf8f5; border-left-color: #37a892; }
+.preview-content.preview-workbench .active-cue .cue-index { color: #268670; }
+.preview-content.preview-workbench .cue-replay { color: #268670; border-color: #d7e8e3; }
+.preview-content.preview-workbench .cue-replay:hover:not(:disabled) { background: #edf8f5; border-color: #83c8b9; }
+.preview-content.preview-workbench .cue-original,
+.preview-content.preview-workbench .cue-translation { margin-top: 3px; }
+.preview-content.preview-workbench .preview-draft-export-card { margin-top: 0; padding: 14px; border: 0; border-top: 1px solid #e1e9ed; border-radius: 0; box-shadow: none; gap: 10px; }
+.preview-content .preview-draft-export-card h2 { flex-wrap: wrap; }
+.preview-content .preview-draft-export-card .preview-export-actions .button { white-space: normal; }
+
+@media (max-width: 950px) {
+  .preview-content.preview-review .preview-layout { grid-template-columns: minmax(0, 1fr); }
+  .preview-content.preview-review .player-card { position: static; }
+  .preview-content.preview-review .cue-list { height: 52vh; min-height: 240px; }
+}
+@media (max-width: 650px) {
+  .preview-content:is(.preview-review, .preview-workbench) .preview-context { flex-basis: 100%; }
+  .preview-content:is(.preview-review, .preview-workbench) .preview-selection { width: auto; }
+  .preview-content:is(.preview-review, .preview-workbench) .preview-selection select { max-width: 180px; }
+  .preview-content:is(.preview-review, .preview-workbench) .preview-toolbar-actions { width: 100%; }
+  .preview-content:is(.preview-review, .preview-workbench) .preview-toolbar-actions .button { flex: 1; }
+  .preview-content.preview-review .preview-source-name { max-width: 100%; }
+  .preview-content.preview-review .player-stage { min-height: 180px; }
+  .preview-content.preview-review .preview-export-actions .button { white-space: normal; }
+  .preview-content.preview-review .preview-review-note { flex-wrap: wrap; }
+  .preview-content.preview-review .preview-review-note > div { flex-basis: calc(100% - 32px); }
+}

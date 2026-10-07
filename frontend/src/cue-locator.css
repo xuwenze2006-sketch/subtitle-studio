@@ -1,0 +1,40 @@
+.cue-locator {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 10px;
+  min-width: 0;
+  margin: 0 16px 12px;
+  color: var(--review-text, #415860);
+  font-size: 12px;
+}
+.cue-locator > label { display: flex; flex-direction: column; gap: 5px; min-width: 0; max-width: 100%; }
+.cue-locator .cue-locator-mode { flex: 0 1 125px; }
+.cue-locator .cue-locator-value { flex: 1 1 180px; }
+.cue-locator :is(input, select) {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid var(--review-border, #d4e2e3);
+  border-radius: 6px;
+  background: var(--review-input, #fff);
+  color: inherit;
+  font: inherit;
+}
+.cue-locator :is(input, select):focus-visible { outline: 2px solid var(--primary, #315ee8); outline-offset: 2px; }
+.cue-locator input[aria-invalid="true"] { border-color: var(--review-error, #b83a45); }
+.cue-locator > .button { flex: 0 0 auto; max-width: 100%; white-space: normal; min-height: 34px; }
+.cue-locator .cue-locator-hint, .cue-locator .cue-locator-feedback {
+  flex: 1 0 100%;
+  min-width: 0;
+  margin: 0;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.cue-locator .cue-locator-hint { color: var(--review-muted, #657b83); font-size: 11px; }
+.cue-locator .cue-locator-error { color: var(--review-error, #b83a45); }
+@media (max-width: 650px) {
+  .cue-locator .cue-locator-mode { flex: 1 1 120px; }
+  .cue-locator .cue-locator-value { flex: 2 1 180px; }
+}

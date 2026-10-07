@@ -1,0 +1,108 @@
+.preview-content .preview-context {
+  flex-wrap: wrap;
+}
+.preview-content:focus-visible { outline: 2px solid #9a8acc; outline-offset: 6px; border-radius: 12px; }
+.preview-selection {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  color: #566278;
+}
+.preview-selection > span { white-space: nowrap; }
+.preview-selection select { min-width: 150px; width: auto; }
+.preview-loading { color: #665ab0; margin: -6px 0 14px; font-size: 13px; }
+.preview-playback-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 20px 16px;
+}
+.preview-cue-navigation { display: flex; gap: 7px; }
+.preview-transport { display: flex; flex-wrap: wrap; gap: 7px; }
+.preview-playback-controls .button { padding: 8px 10px; font-size: 12px; }
+.preview-shortcuts { margin: -4px 20px 14px; font-size: 12px; color: #65738b; line-height: 1.9; }
+.preview-shortcuts kbd { padding: 1px 4px; border: 1px solid #e2dfed; border-radius: 4px; background: #faf9fd; font-family: inherit; }
+.preview-download-receipt { margin-top: 12px; font-size: 12px; color: #377665; line-height: 1.7; overflow-wrap: anywhere; }
+.preview-rate { display: flex; align-items: center; gap: 8px; color: #66738a; font-size: 12px; }
+.preview-rate select { width: 85px; min-height: 34px; padding: 5px 9px; }
+.preview-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 0 16px 15px;
+  color: #748198;
+}
+.preview-search > svg { position: absolute; left: 11px; pointer-events: none; }
+.preview-search input { padding: 10px 34px; font-size: 13px; }
+.preview-search input::-webkit-search-cancel-button { display: none; }
+.preview-search > button {
+  position: absolute;
+  right: 6px;
+  padding: 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #66738a;
+  display: grid;
+  place-items: center;
+}
+.preview-search > button:hover { background: #eeeaf8; }
+.preview-content .cue-row { padding: 0; gap: 0; align-items: center; }
+.preview-content .cue-row.active-cue { padding-left: 0; }
+.cue-seek {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 11px;
+  text-align: left;
+  padding: 16px 8px 16px 16px;
+  background: transparent;
+  color: inherit;
+  border: none;
+}
+.cue-seek > div:last-child { min-width: 0; }
+.cue-seek:disabled { cursor: default; }
+.preview-content .active-cue .cue-seek { padding-left: 13px; }
+.preview-content .cue-original { color: #39485f; font-size: 13px; line-height: 1.65; }
+.preview-content .cue-translation { color: #65738b; font-size: 13px; line-height: 1.65; }
+.preview-content .cue-row time { color: #6c7890; }
+.preview-content .cue-row time span { color: #8591a6; }
+.cue-replay {
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  margin: 8px 12px 8px 3px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #e5e2f1;
+  border-radius: 50%;
+  color: #7665bc;
+  background: #fff;
+}
+.cue-replay:hover:not(:disabled) { background: #f0ecfc; border-color: #b7addc; }
+.cue-replay:disabled { opacity: .45; cursor: default; }
+.preview-export-card {
+  margin-top: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 18px;
+}
+.preview-export-card h2 { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.preview-export-card p { margin-top: 8px; font-size: 13px; color: #66738a; overflow-wrap: anywhere; }
+.preview-export-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+@media (max-width: 650px) {
+  .preview-content .preview-toolbar { align-items: flex-start; }
+  .preview-content .preview-context { gap: 9px; }
+  .preview-selection { width: 100%; }
+  .preview-selection select { min-width: 0; max-width: 170px; }
+  .preview-content .preview-toolbar > .button { padding: 9px; font-size: 12px; white-space: nowrap; }
+  .preview-playback-controls { padding-inline: 14px; gap: 8px; }
+  .preview-export-actions { width: 100%; }
+  .preview-export-actions .button { flex-grow: 1; }
+}

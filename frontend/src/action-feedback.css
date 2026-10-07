@@ -1,0 +1,32 @@
+/* Operation receipts stay in view without moving a long review page. */
+.app-action-feedback {
+  position: fixed;
+  /* Leave the connection status and reconnect button reachable. */
+  top: 72px;
+  right: 20px;
+  z-index: 40;
+  width: min(520px, calc(100vw - 32px));
+  max-height: 50dvh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  gap: 10px;
+  border-radius: 12px;
+  box-shadow: 0 10px 32px #1b2c4826;
+}
+.app-action-feedback .notice { margin: 0; min-width: 0; }
+.app-action-feedback .notice > div { min-width: 0; overflow-wrap: anywhere; }
+.app-action-feedback .notice-dismiss { flex-shrink: 0; min-width: 28px; min-height: 28px; }
+.app-action-feedback .completion-actions { justify-content: flex-end; }
+.connection .button { min-height: 28px; padding: 4px 8px; font-size: 11px; }
+.review-shell .app-action-feedback .notice { background: #263541; border-color: #3c5363; color: #c6dbe6; }
+.review-shell .app-action-feedback .notice-error { background: #3b292f; border-color: #76515e; color: #f0bbc5; }
+.review-shell .app-action-feedback .notice-success { background: #223d37; border-color: #42756b; color: #b7eadc; }
+.review-shell .app-action-feedback .notice-warning { background: #393326; border-color: #655c40; color: #e5d2a7; }
+.review-shell .app-action-feedback .button { background: #2a3543; border-color: #657489; color: #e1e9f3; }
+@media (max-width: 650px) {
+  .app-action-feedback { top: 60px; right: 12px; width: calc(100vw - 24px); }
+  .app-action-feedback .notice { flex-wrap: wrap; gap: 8px; padding: 12px; }
+  .app-action-feedback .notice > div { flex: 1; }
+  .app-action-feedback .completion-actions { flex-basis: 100%; }
+}
