@@ -19,6 +19,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .atomic_io import cleanup_temporary, replace_with_retry
+from .integrity import valid_translation_content
+
 
 class TranslationError(RuntimeError):
     """A translation or its durable cache could not be completed safely."""
@@ -178,12 +181,12 @@ def _save_cache(path: Path, payload: dict) -> None:
             json.dump(payload, stream, ensure_ascii=False, separators=(',', ':'))
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
     except OSError as error:
         raise TranslationError(f'翻译缓存写入失败：{path}') from error
     finally:
-        if temporary is not None and temporary.exists():
-            temporary.unlink()
+        if temporary is not None:
+            cleanup_temporary(temporary)
 
 
 def _format_batch(texts: list[str]) -> str:
@@ -263,7 +266,7 @@ def translate_texts(texts: list[str], source: str, target: str, cache_path: Path
             entry = cache['entries'].get(_key(text, source, target))
             if not text.strip():
                 mapped[text] = ''
-            elif entry is not None:
+            elif entry is not None and valid_translation_content(text, entry['translation']):
                 mapped[text] = entry['translation']
             else:
                 pending.append(text)
@@ -271,6 +274,9 @@ def translate_texts(texts: list[str], source: str, target: str, cache_path: Path
 
         def save(originals: list[str], translations: list[str]) -> None:
             _check_cancel(stop_event)
+            if any(not valid_translation_content(original, translation)
+                   for original, translation in zip(originals, translations, strict=True)):
+                raise _InvalidResponse('翻译服务返回的译文缺少正文；未保存该批译文，请稍后重试。')
             for original, translation in zip(originals, translations, strict=True):
                 cache['entries'][_key(original, source, target)] = {
                     'source': source, 'target': target, 'text': original, 'translation': translation,
@@ -288,7 +294,8 @@ def translate_texts(texts: list[str], source: str, target: str, cache_path: Path
                     pass
             if translated is not None:
                 for index, original in enumerate(batch):
-                    if _looks_copied(original, translated[index], source, target):
+                    if (not valid_translation_content(original, translated[index])
+                            or _looks_copied(original, translated[index], source, target)):
                         translated[index] = client.translate(original)
                 save(batch, translated)
             else:

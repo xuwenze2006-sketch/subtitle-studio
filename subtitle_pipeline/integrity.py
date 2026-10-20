@@ -126,6 +126,8 @@ def reconcile_translation(folder,chunk,part,backup,write,*,target='zh-CN'):
     if len(chosen)!=len(source) or any((a.start_ms,a.end_ms)!=(b.start_ms,b.end_ms)
                                      for a,b in zip(source,chosen)):
         raise HumanEditConflict('人工修改的译文时间轴与原文不一致')
+    if any(not valid_translation_content(a.text,b.text) for a,b in zip(source,chosen)):
+        raise HumanEditConflict('人工修改的译文缺少正文，请保留文件并修正后再继续')
     backup(local);backup(public)
     write(local,render_srt(chosen))
     write(public,render_srt([Cue(c.start_ms+chunk.audio_start_ms,c.end_ms+chunk.audio_start_ms,c.text)

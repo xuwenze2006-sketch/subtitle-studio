@@ -19,6 +19,7 @@ import tempfile
 import time
 
 from .api_key import is_transport_key
+from .atomic_io import cleanup_temporary, replace_with_retry
 
 
 SUPPORTED_KEYS = ('SILICONFLOW_API_KEY', 'DASHSCOPE_API_KEY', 'DEEPSEEK_API_KEY')
@@ -163,10 +164,10 @@ def _write_unlocked(path: Path, values: dict[str, str]) -> None:
             stream.write(json.dumps(envelope, separators=(',', ':')).encode('ascii'))
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            cleanup_temporary(temporary)
 
 
 def read_saved_secrets(path: str | Path | None = None) -> dict[str, str]:

@@ -151,6 +151,7 @@ class ReadinessCancellationTests(OfflineFixture):
 
     def services(self, *, samples=False, cached=False):
         guards = ExitStack()
+        self.addCleanup(guards.close)
         guards.enter_context(patch.object(w, 'verify_source', return_value=self.source))
         settings = SimpleNamespace(asr_input_rate=.8, asr_output_rate=2.7,
             public_config=lambda: {})

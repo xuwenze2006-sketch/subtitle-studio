@@ -26,7 +26,7 @@ from .languages import validate_languages, target_filename, output_names, manife
 from . import translation_context
 from .integrity import (sha256, fingerprint, reconcile_source, reconcile_translation,
                         HumanEditConflict, verify_part, validate_chunk_plan, evidence_matches,
-                        sample_state_evidence, reconcile_merged_source)
+                        sample_state_evidence, reconcile_merged_source, valid_translation_content)
 
 
 class Cancelled(RuntimeError):
@@ -755,6 +755,8 @@ def _run_locked(config, stop, progress):
         atomic_json(state_path,state)
         return saved
 
+    translation_recovery_hashes = {}
+
     def translation_task(chunk,context_snapshot=None):
         if worker_stop.is_set():
             raise Cancelled('已停止')
@@ -766,17 +768,35 @@ def _run_locked(config, stop, progress):
         if context_snapshot is not None:
             translation_context.validate_snapshot(context_snapshot,source_hash)
             context_options['context_before']=translation_context.source_texts(context_snapshot)
-        if config.translation_provider=='deepseek':
-            from .deepseek_translate import translate_texts as deepseek_texts
-            settings,translation_ledger=cloud_context(config)
-            texts=deepseek_texts([c.text for c in cues],config.language,config.target,
-                project/'deepseek-translation-cache.json',ledger=translation_ledger,key=settings.deepseek_key,
-                model=config.translation_model,input_rate_cny_per_million=settings.deepseek_input_rate,
-                output_rate_cny_per_million=settings.deepseek_output_rate,stop_event=worker_stop,**context_options)
-        else:
-            texts = translate_texts([c.text for c in cues], config.language, config.target, project/'translation-cache.json',stop_event=worker_stop)
-        if len(texts)!=len(cues) or any(not t.strip() for t in texts):
-            raise RuntimeError('翻译结果与字幕数量不一致，未保存该段译文')
+        expected_targets = translation_recovery_hashes.get(chunk.index)
+
+        def check_recovery_targets():
+            if expected_targets is None:
+                return
+            try:
+                current = tuple(sha256(folder/name) for name in ('target.local.srt',translated_name))
+            except OSError as error:
+                raise HumanEditConflict('恢复翻译期间目标字幕被删除或无法读取；已保留文件，请核对后继续') from error
+            if current != expected_targets:
+                raise HumanEditConflict('恢复翻译期间目标字幕被修改；已保留人工修改和返回响应，请核对后继续')
+
+        check_recovery_targets()
+        try:
+            if config.translation_provider=='deepseek':
+                from .deepseek_translate import translate_texts as deepseek_texts
+                settings,translation_ledger=cloud_context(config)
+                texts=deepseek_texts([c.text for c in cues],config.language,config.target,
+                    project/'deepseek-translation-cache.json',ledger=translation_ledger,key=settings.deepseek_key,
+                    model=config.translation_model,input_rate_cny_per_million=settings.deepseek_input_rate,
+                    output_rate_cny_per_million=settings.deepseek_output_rate,stop_event=worker_stop,**context_options)
+            else:
+                texts = translate_texts([c.text for c in cues], config.language, config.target, project/'translation-cache.json',stop_event=worker_stop)
+        except Exception:
+            check_recovery_targets()
+            raise
+        check_recovery_targets()
+        if len(texts)!=len(cues) or any(not valid_translation_content(c.text,t) for c,t in zip(cues,texts)):
+            raise RuntimeError('翻译结果缺少正文或与字幕数量不一致，未保存该段译文')
         if sha256(folder/'source.local.srt')!=source_hash:
             raise HumanEditConflict('翻译期间原文被修改；已返回的响应保留，未覆盖字幕，请重新载入任务')
         translated = [Cue(c.start_ms,c.end_ms,t) for c,t in zip(cues,texts)]
@@ -945,6 +965,9 @@ def _run_locked(config, stop, progress):
                     part.update(candidate)
                     diagnostic['recovered_asr' if is_asr else 'recovered_translation']+=1
                 except Exception as error:
+                    if not is_asr and isinstance(error,HumanEditConflict):
+                        state['parts'][str(chunk.index)].update(translation='needs_review',translation_error=str(error))
+                        state['review_status']='needs_review'
                     _note_secondary_error(primary,stage,error)
 
     preparation_cancelled = False
@@ -985,7 +1008,13 @@ def _run_locked(config, stop, progress):
                             ('translation_contexts','translation_context_bindings') if key in part}
                         part.clear()
                         part.update(context_history)
-                if part.get('translation') in ('done','needs_review'):
+                # A failed recovery retains its old content-bound hashes even
+                # after losing the completion label. Reconcile those files on
+                # the next run before issuing another translation request.
+                cached_translation_pending = (part.get('translation') not in ('done','needs_review')
+                    and part.get('translation_source_hash')==part.get('source_hash')
+                    and bool(part.get('target_hash')) and bool(part.get('public_target_hash')))
+                if part.get('translation') in ('done','needs_review') or cached_translation_pending:
                     try:
                         if part.get('translation_source_hash')!=part.get('source_hash'):
                             raise ValueError('源文内容变化，旧译文失效')
@@ -995,10 +1024,22 @@ def _run_locked(config, stop, progress):
                         source = parse_srt((folder/'source.local.srt').read_text(encoding='utf-8-sig'))
                         if len(target)!=len(source) or any((a.start_ms,a.end_ms)!=(b.start_ms,b.end_ms) for a,b in zip(source,target)):
                             raise ValueError('cached translation timeline mismatch')
+                        if any(not valid_translation_content(a.text,b.text) for a,b in zip(source,target)):
+                            # Only unchanged machine output may be regenerated.
+                            # A previously adopted human edit is still human even
+                            # when its current bytes match the recorded hashes.
+                            if (part.get('human_translation_edited') or part.get('translation')=='needs_review'
+                                    or not part.get('target_hash') or not part.get('public_target_hash')
+                                    or sha256(folder/'target.local.srt')!=part['target_hash']
+                                    or sha256(folder/translated_name)!=part['public_target_hash']):
+                                raise HumanEditConflict('人工译文或来源未确认的译文缺少正文；已保留文件，请核对后继续')
+                            translation_recovery_hashes[chunk.index] = (part['target_hash'],part['public_target_hash'])
+                            raise ValueError('cached translation lacks lexical content')
                         if changed:
                             state['review_status']='needs_review'
-                        part['translation']='done'
-                        part.pop('translation_error',None)
+                        if not cached_translation_pending or changed:
+                            part['translation']='done'
+                            part.pop('translation_error',None)
                     except HumanEditConflict as exc:
                         part['translation']='needs_review'
                         part['translation_error']=str(exc)
@@ -1006,7 +1047,9 @@ def _run_locked(config, stop, progress):
                         state['review_status']='needs_review'
                         continue
                     except (OSError,ValueError):
-                        if part.get('translation')=='needs_review':
+                        if (part.get('translation')=='needs_review'
+                                or cached_translation_pending and chunk.index not in translation_recovery_hashes):
+                            part['translation']='needs_review'
                             part['translation_error']='人工译文冲突尚未解决；未覆盖、未重新翻译'
                             translation_errors.append(part['translation_error'])
                             state['review_status']='needs_review'
@@ -1097,6 +1140,9 @@ def _run_locked(config, stop, progress):
                     except (Cancelled,futures.CancelledError):
                         pass
                     except Exception as exc:
+                        if not is_asr and isinstance(exc,HumanEditConflict):
+                            part.update(translation='needs_review',translation_error=str(exc))
+                            state['review_status']='needs_review'
                         if stop.is_set():
                             continue
                         key = 'error' if is_asr else 'translation_error'
