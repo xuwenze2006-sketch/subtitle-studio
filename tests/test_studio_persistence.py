@@ -147,10 +147,10 @@ class StudioPersistenceTests(unittest.TestCase):
     def test_slow_state_response_refreshes_save_warning_without_job_change(self):
         entered=threading.Event();release=threading.Event()
         original=studio.StudioController._saved_state
-        def read(view):
+        def read(view,**kwargs):
             entered.set()
             if not release.wait(6):raise AssertionError('state read not released')
-            return original(view)
+            return original(view,**kwargs)
         with patch.object(studio.StudioController,'_saved_state',read),ThreadPoolExecutor(max_workers=2) as pool:
             result=pool.submit(self.app.state)
             try:

@@ -539,6 +539,9 @@ export default function App() {
             </div>)}
           </div>
 
+          {snapshot?.project_error && <Notice tone="warning" title="当前项目需要检查">
+            {snapshot.project_error}
+          </Notice>}
           {shownOpenReceipt && (
             <section className="open-location-receipt" role="status" aria-label="打开位置反馈">
               <div className="open-location-summary">

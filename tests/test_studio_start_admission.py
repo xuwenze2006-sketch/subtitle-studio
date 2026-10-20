@@ -58,14 +58,14 @@ class StudioStartAdmissionTests(unittest.TestCase):
     def delayed_read(self, number=1):
         entered, release = threading.Event(), threading.Event()
         original = studio.read_json; reads = []
-        def read(path):
+        def read(path,**kwargs):
             if (Path(path)==self.project/'state.json'
                     and threading.current_thread().name.startswith('pending-start')):
                 reads.append(path)
                 if len(reads)==number:
                     entered.set()
                     if not release.wait(5): raise AssertionError('preflight read not released')
-            return original(path)
+            return original(path,**kwargs)
         with patch.object(studio,'read_json',side_effect=read):
             try: yield entered,release
             finally: release.set()

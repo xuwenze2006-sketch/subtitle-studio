@@ -97,11 +97,11 @@ class StudioTests(unittest.TestCase):
     def test_slow_state_does_not_block_progress_and_returns_isolated_job(self):
         entered=threading.Event();release=threading.Event()
         original=self.s.StudioController._saved_state
-        def slow(view):
+        def slow(view,**kwargs):
             if not entered.is_set():
                 entered.set()
                 if not release.wait(4):raise AssertionError('state read was not released')
-            return original(view)
+            return original(view,**kwargs)
         self.app.job.update(action='local',logs=['original'])
         with patch.object(self.s.StudioController,'_saved_state',slow),ThreadPoolExecutor(max_workers=2) as pool:
             state=pool.submit(self.app.state)
@@ -121,11 +121,11 @@ class StudioTests(unittest.TestCase):
     def test_state_refreshes_job_and_actions_when_run_starts_during_read(self):
         entered=threading.Event();release=threading.Event();worker_release=threading.Event()
         original=self.s.StudioController._saved_state
-        def slow(view):
+        def slow(view,**kwargs):
             if not entered.is_set():
                 entered.set()
                 if not release.wait(4):raise AssertionError('state read was not released')
-            return original(view)
+            return original(view,**kwargs)
         def run(*args,**kwargs):
             if not worker_release.wait(4):raise AssertionError('worker was not released')
             return {'status':'complete'}
@@ -173,11 +173,11 @@ class StudioTests(unittest.TestCase):
     def test_state_retries_snapshot_after_project_selection_changes(self):
         entered=threading.Event();release=threading.Event()
         original=self.s.StudioController._saved_state
-        def slow(view):
+        def slow(view,**kwargs):
             if not entered.is_set():
                 entered.set()
                 if not release.wait(4):raise AssertionError('state read was not released')
-            return original(view)
+            return original(view,**kwargs)
         alternate=self.root/'alternate';alternate.mkdir()
         with patch.object(self.s.StudioController,'_saved_state',slow),ThreadPoolExecutor(max_workers=2) as pool:
             state=pool.submit(self.app.state)

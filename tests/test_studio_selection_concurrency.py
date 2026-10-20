@@ -65,13 +65,13 @@ class StudioSelectionConcurrencyTests(unittest.TestCase):
         target = target or self.projects['b']/filename
         entered,release = threading.Event(),threading.Event(); reads = []
         original = studio.read_json
-        def read(path):
+        def read(path,**kwargs):
             if Path(path)==target and threading.current_thread().name.startswith('pending-select'):
                 reads.append(path)
                 if len(reads)==number:
                     entered.set()
                     if not release.wait(5): raise AssertionError('selection read not released')
-            return original(path)
+            return original(path,**kwargs)
         with patch.object(studio,'read_json',side_effect=read):
             try: yield entered,release
             finally: release.set()
@@ -106,9 +106,9 @@ class StudioSelectionConcurrencyTests(unittest.TestCase):
         def resolve(path,*args,**kwargs):
             self.assertFalse(self.app.lock._is_owned(),'selection resolved a filesystem path under the live lock')
             return original_resolve(path,*args,**kwargs)
-        def read(path):
+        def read(path,**kwargs):
             self.assertFalse(self.app.lock._is_owned(),'selection read project JSON under the live lock')
-            return original_read(path)
+            return original_read(path,**kwargs)
         old_id = self.app._project_id()
         with patch.object(Path,'resolve',resolve), patch.object(studio,'read_json',side_effect=read):
             result = self.app.select_project({'campaign':str(self.projects['b'])})

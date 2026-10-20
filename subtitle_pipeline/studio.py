@@ -57,11 +57,15 @@ def data_directory():
     return Path(os.environ.get('LOCALAPPDATA',str(Path.home()/'.local/share')))/'SubtitlePipeline'
 
 
-def read_json(path):
+def read_json(path,*,strict=False):
     try:
         value=json.loads(Path(path).read_text(encoding='utf-8'))
+        if strict and not isinstance(value,dict):raise ValueError('项目记录不是 JSON 对象')
         return value if isinstance(value,dict) else {}
-    except (OSError,ValueError):return {}
+    except FileNotFoundError:return {}
+    except (OSError,ValueError):
+        if strict:raise ValueError('项目记录无法读取，请保留原文件并检查') from None
+        return {}
 
 
 def account_environment():
@@ -285,9 +289,9 @@ class StudioController:
         if not child.is_relative_to(parent):raise ValueError('结果路径不在所选项目内')
         return child
 
-    def _saved_state(self):
+    def _saved_state(self,*,strict=False):
         if not self.campaign:return {}
-        return read_json(self._contained_path(self._output_dir(),'state.json'))
+        return read_json(self._contained_path(self._output_dir(),'state.json'),strict=strict)
 
     def _is_cloud_project(self,previous=None):
         if not self.campaign:return False
@@ -464,12 +468,16 @@ class StudioController:
         # again or allowing stale busy-dependent actions through to the UI.
         if self.job!=view.job:
             job=deepcopy(self.job)
-            accounts=result['accounts']
-            actions=available_actions(result['campaign_status'],approval_exists=result['approval_exists'],
-                ready=accounts['bailian']['ready'],busy=job['busy'],
-                siliconflow_ready=accounts['siliconflow']['ready'],
-                siliconflow_result_exists=result['siliconflow_result_exists'])
-            actions['local']=not job['busy'] and view._local_action_allowed
+            if result.get('project_error'):
+                actions={name:False for name in result['actions']}
+                actions['stop']=job['busy']
+            else:
+                accounts=result['accounts']
+                actions=available_actions(result['campaign_status'],approval_exists=result['approval_exists'],
+                    ready=accounts['bailian']['ready'],busy=job['busy'],
+                    siliconflow_ready=accounts['siliconflow']['ready'],
+                    siliconflow_result_exists=result['siliconflow_result_exists'])
+                actions['local']=not job['busy'] and view._local_action_allowed
             result.update(job=job,actions=actions)
         result['persistence_warning']=self.persistence_warning
         return result
@@ -493,47 +501,65 @@ class StudioController:
                 price_per_second=values.get('SILICONFLOW_ASR_CNY_PER_SECOND') or '0.000220',
                 pricing_reference=values.get('SILICONFLOW_PRICING_REFERENCE',''))
             accounts['bailian']['ready']=ready
-            manifest=read_json(self._project_path()/'campaign.json') if self.campaign else {}
-            stage=manifest.get('status','')
-            manual_status=self._manual_status(manifest)
-            if stage in ('final_reviewed','exported') and manual_status.get('invalidates_approval'):
-                stage='full_ready'
-            approval=bool(self.campaign and (self._project_path()/'approval.json').is_file())
-            sf_result=bool(self.campaign and (self._project_path()/'硅基流动识别试听.html').is_file())
-            job=json.loads(json.dumps(self.job))
-            previous=self._saved_state()
-            if not job['action'] and previous:
-                for name in ('status','message','total','recognized','translated'):
-                    if name in previous:job[name]=previous[name]
-            actions=available_actions(stage,approval_exists=approval,ready=ready,busy=job['busy'],
-                                      siliconflow_ready=accounts['siliconflow']['ready'],siliconflow_result_exists=sf_result)
             local=engine_available()
-            self._local_action_allowed=local and not self._is_cloud_project(previous)
-            actions['local']=not job['busy'] and self._local_action_allowed
-            config=previous.get('config',{})
-            project_config={k:config[k] for k in ('language','target','chunk_seconds','workers','threads','translate','asr_provider') if k in config}
-            if manifest:
-                language,target=manifest_languages(manifest)
-                project_config.update(language=language,target=target,translate=True)
-            elif config:
-                project_config.setdefault('language','ja');project_config.setdefault('target','zh-CN')
-            provider=manifest.get('asr_provider') or config.get('asr_provider')
-            if not provider and config:provider='whisper_cpp'
-            if provider:
-                project_config['asr_provider']=provider
-                project_config['engine']={'qwen_asr':'bailian','whisper_cpp':'local','siliconflow':'siliconflow'}.get(provider,'')
-            if config and provider=='whisper_cpp':
-                project_config['model']='small'
-            return {'app':'字幕工坊','source':self.source,'campaign':self.campaign,'baseline':self.baseline,
-                    'project_id':self._project_id(),
-                    'language_options':{'sources':['ja','en','zh'],'targets':['zh-CN','en','ja']},
-                    'job':job,'accounts':accounts,'settings':settings,'settings_error':error,
-                    'recent':self._recent_state(),'local_available':local,'actions':actions,'campaign_status':stage,
-                    'approval_exists':approval,'siliconflow_result_exists':sf_result,
-                    'project_config':project_config,'budget':self._budget_summary(config,manifest),
-                    'persistence_warning':self.persistence_warning,
-                    'manual_review':manual_status,
-                    'file_layout':self._file_layout_data(previous)}
+            result={'app':'字幕工坊','source':self.source,'campaign':self.campaign,'baseline':self.baseline,
+                'project_id':self._project_id(),
+                'language_options':{'sources':['ja','en','zh'],'targets':['zh-CN','en','ja']},
+                'accounts':accounts,'settings':settings,'settings_error':error,
+                'recent':self._recent_state(),'local_available':local,
+                'persistence_warning':self.persistence_warning,'project_error':''}
+            try:result.update(self._project_state_data(accounts,ready,local))
+            except (OSError,ValueError,TypeError,AttributeError,KeyError):
+                # A damaged selected project's display data must not disconnect
+                # the host or prevent choosing another task. Never repair it here.
+                self._local_action_allowed=False
+                actions={name:False for name in available_actions('',approval_exists=False,ready=False,busy=False)}
+                actions.update(local=False,stop=self.job['busy'])
+                result.update(project_error='当前项目配置无法读取，请保留原目录并检查；可载入其他任务或新建任务。',
+                    job=deepcopy(self.job),actions=actions,campaign_status='needs_attention',
+                    approval_exists=False,siliconflow_result_exists=False,project_config={},budget=None,
+                    manual_review={'supported':False},file_layout={'source_path':self.source,
+                        'project_path':self.campaign,'exports_path':'','created_at':'','video_path':''})
+            return result
+
+    def _project_state_data(self,accounts,ready,local):
+        """Read project display data separately from the host's connection state."""
+        manifest=read_json(self._project_path()/'campaign.json',strict=True) if self.campaign else {}
+        previous=self._saved_state(strict=True)
+        config=previous.get('config',{})
+        if not isinstance(config,dict):raise ValueError('项目配置不是对象')
+        if 'identity' in previous and not isinstance(previous['identity'],dict):raise ValueError('项目身份不是对象')
+        if 'source' in manifest and not isinstance(manifest['source'],dict):raise ValueError('项目来源不是对象')
+        stage=manifest.get('status','')
+        manual_status=self._manual_status(manifest)
+        if stage in ('final_reviewed','exported') and manual_status.get('invalidates_approval'):
+            stage='full_ready'
+        approval=bool(self.campaign and (self._project_path()/'approval.json').is_file())
+        sf_result=bool(self.campaign and (self._project_path()/'硅基流动识别试听.html').is_file())
+        job=deepcopy(self.job)
+        if not job['action'] and previous:
+            for name in ('status','message','total','recognized','translated'):
+                if name in previous:job[name]=previous[name]
+        actions=available_actions(stage,approval_exists=approval,ready=ready,busy=job['busy'],
+            siliconflow_ready=accounts['siliconflow']['ready'],siliconflow_result_exists=sf_result)
+        self._local_action_allowed=local and not self._is_cloud_project(previous)
+        actions['local']=not job['busy'] and self._local_action_allowed
+        project_config={k:config[k] for k in ('language','target','chunk_seconds','workers','threads','translate','asr_provider') if k in config}
+        if manifest:
+            language,target=manifest_languages(manifest)
+            project_config.update(language=language,target=target,translate=True)
+        elif config:
+            project_config.setdefault('language','ja');project_config.setdefault('target','zh-CN')
+        provider=manifest.get('asr_provider') or config.get('asr_provider')
+        if not provider and config:provider='whisper_cpp'
+        if provider:
+            project_config['asr_provider']=provider
+            project_config['engine']={'qwen_asr':'bailian','whisper_cpp':'local','siliconflow':'siliconflow'}.get(provider,'')
+        if config and provider=='whisper_cpp':project_config['model']='small'
+        return {'job':job,'actions':actions,'campaign_status':stage,
+            'approval_exists':approval,'siliconflow_result_exists':sf_result,
+            'project_config':project_config,'budget':self._budget_summary(config,manifest),
+            'manual_review':manual_status,'file_layout':self._file_layout_data(previous)}
 
     def _manual_status(self,manifest):
         result={'supported':True}
@@ -766,9 +792,10 @@ class StudioController:
     def _start_payload(self,data):
         """Validate a detached selection without changing live run state."""
         action=data.get('action')
+        state=self._state_data()
+        if state.get('project_error'):raise ValueError(state['project_error'])
         if action=='local' and self._is_cloud_project():
             raise ValueError('这个项目属于云端识别，请通过云端流程继续；本地识别请新建任务')
-        state=self._state_data()
         if action not in state['actions'] or not state['actions'][action] or action in ('stop','review','siliconflow-review'):
             raise ValueError('当前步骤尚未满足条件，请先配置账户或完成前一步审核')
         project=self._project_path()
