@@ -8,16 +8,19 @@ substitutions. Endpoint formats follow Subtitle Edit 5.2.0 GoogleTranslateV1.cs.
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 from .atomic_io import cleanup_temporary, replace_with_retry
 from .integrity import valid_translation_content
@@ -39,6 +42,7 @@ _MAX_BATCH_CUES = 16
 _MAX_BATCH_CHARACTERS = 1200
 _MAX_CUE_CHARACTERS = 1500
 _REQUEST_INTERVAL = 0.5
+_REQUEST_TIMEOUT = 15
 _RETRY_DELAYS = (1.0, 3.0, 7.0)
 _queue = threading.Lock()
 _last_request_at = 0.0
@@ -60,17 +64,60 @@ def _wait(seconds: float, stop_event: threading.Event | None) -> None:
             _check_cancel(stop_event)
 
 
-def _request_json(url: str):
-    request = Request(url, headers={
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                      'AppleWebKit/537.36 (KHTML, like Gecko) '
-                      'Chrome/139.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-    })
-    with urlopen(request, timeout=15) as response:
-        body = response.read(1_048_577)
-    if len(body) > 1_048_576:
-        raise _InvalidResponse('翻译服务响应过大。')
+def _request_json(url: str, stop_event: threading.Event | None = None):
+    # Lazy imports avoid runner -> translate -> local_process -> runner.
+    from .local_process import capture_process, OutputLimitExceeded
+    from .runner import Cancelled
+    from .translation_transport import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES
+
+    _check_cancel(stop_event)
+    request = json.dumps({'url': url}, ensure_ascii=False).encode('utf-8')
+    if len(request) > MAX_REQUEST_BYTES:
+        raise _InvalidResponse('翻译请求过大。')
+    limit = ((MAX_RESPONSE_BYTES + 2) // 3) * 4 + 1024
+    try:
+        # A regular temporary file avoids a blocking Windows stdin pipe write.
+        # Neither subtitles nor their URL appear in process arguments.
+        with tempfile.TemporaryFile(mode='w+b') as input_file:
+            input_file.write(request)
+            input_file.seek(0)
+            result = capture_process(
+                [sys.executable, '-X', 'utf8', '-m', 'subtitle_pipeline.translation_transport'],
+                stdin=input_file, cwd=Path(__file__).resolve().parent.parent,
+                stop=stop_event, timeout=_REQUEST_TIMEOUT, max_output_bytes=limit)
+    except Cancelled as error:
+        raise TranslationCancelled('翻译已取消；已完成的译文保留在缓存中。') from error
+    except subprocess.TimeoutExpired as error:
+        raise TimeoutError('翻译请求超过总等待时间。') from error
+    except OutputLimitExceeded as error:
+        raise _InvalidResponse('翻译服务响应过大。') from error
+    except subprocess.CalledProcessError as error:
+        raise URLError('翻译请求进程未正常完成。') from error
+    _check_cancel(stop_event)
+    try:
+        if len(result.stdout) > limit:
+            raise ValueError
+        envelope = json.loads(result.stdout)
+        if not isinstance(envelope, dict):
+            raise ValueError
+        kind = envelope.get('kind')
+        if kind == 'http' and set(envelope) == {'kind', 'code'}:
+            code = envelope['code']
+            if type(code) is not int or not 300 <= code <= 599:
+                raise ValueError
+            raise HTTPError('', code, '翻译服务 HTTP 错误', {}, None)
+        if kind == 'network' and set(envelope) == {'kind'}:
+            raise URLError('翻译服务网络请求失败。')
+        if kind == 'too_large' and set(envelope) == {'kind'}:
+            raise _InvalidResponse('翻译服务响应过大。')
+        if (kind != 'ok' or set(envelope) != {'kind', 'body'}
+                or not isinstance(envelope['body'], str)):
+            raise ValueError
+        body = base64.b64decode(envelope['body'], validate=True)
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise ValueError
+    except (ValueError, UnicodeError, binascii.Error) as error:
+        raise _InvalidResponse('翻译请求进程返回无效结果。') from error
     try:
         return json.loads(body.decode('utf-8'))
     except (UnicodeError, ValueError) as error:
@@ -130,7 +177,7 @@ class _Client:
                 query['dt'] = 't'
             _last_request_at = time.monotonic()
             try:
-                payload = _request_json(endpoint + '?' + urlencode(query))
+                payload = _request_json(endpoint + '?' + urlencode(query), stop_event=self.stop_event)
                 _check_cancel(self.stop_event)
                 return _response_text(payload, self.fallback)
             except HTTPError as error:
@@ -244,7 +291,8 @@ def translate_texts(texts: list[str], source: str, target: str, cache_path: Path
     Requests across callers in this process share one queue and a 0.5 s minimum
     interval. Up to 16 cues / 1200 characters are batched with paired IDs; failed
     ID validation falls back to individual cues. Stop is checked between cues,
-    waits and retries; an in-flight HTTP request can take up to its 15 s timeout.
+    waits, retries and in-flight requests. Each request has a 15 s total budget;
+    the owned request process is reaped before cancellation returns.
     """
     _check_cancel(stop_event)
     if not source or not target:

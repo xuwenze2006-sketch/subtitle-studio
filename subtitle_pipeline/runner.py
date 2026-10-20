@@ -24,6 +24,7 @@ from .atomic_io import cleanup_temporary, replace_with_retry
 from .windows_job import owned_process
 from .languages import validate_languages, target_filename, output_names, manifest_languages
 from . import translation_context
+from .file_observation import file_token
 from .integrity import (sha256, fingerprint, reconcile_source, reconcile_translation,
                         HumanEditConflict, verify_part, validate_chunk_plan, evidence_matches,
                         sample_state_evidence, reconcile_merged_source, valid_translation_content)
@@ -254,19 +255,48 @@ def recognize_chunk(config, chunk, folder, stop, *, before_submit=None):
     return parse_srt((folder/'asr.srt').read_text(encoding='utf-8-sig'))
 
 
-def file_identity(path, stop=None):
+def _check_identity_stop(stop, cause=None):
     if stop is not None and stop.is_set():
-        raise Cancelled('已停止核对输入文件')
+        raise Cancelled('已停止核对输入文件') from cause
+
+
+def file_identity(path, stop=None):
+    _check_identity_stop(stop)
     path = Path(path).resolve()
-    stat = path.stat()
-    if not path.is_file():
-        raise ValueError('输入必须是文件')
-    if stop is None:
-        digest = sha256(path)
-    else:
-        from .export_io import cancellable_sha256
-        digest = cancellable_sha256(path, stop)
-    return {'path':str(path), 'size':stat.st_size, 'mtime_ns':stat.st_mtime_ns,'sha256':digest}
+    try:
+        if not path.is_file():
+            path.stat()  # Preserve an absent/inaccessible input's original error.
+            raise ValueError('输入必须是文件')
+        before=file_token(path)
+        _check_identity_stop(stop)
+        if stop is None:
+            digest = sha256(path)
+        else:
+            from .export_io import cancellable_sha256
+            digest = cancellable_sha256(path, stop)
+        _check_identity_stop(stop)
+        after=file_token(path)
+    except (OSError,ValueError) as error:
+        _check_identity_stop(stop,error)
+        raise
+    _check_identity_stop(stop)
+    if before!=after:
+        raise ValueError('校验期间输入文件发生变化，未确认文件身份')
+    return {'path':str(path), 'size':before[2], 'mtime_ns':before[3],'sha256':digest}
+
+
+def _task_identity_matches(saved, current):
+    """Only cross-run file mtime may differ after stable full content hashes."""
+    if not isinstance(saved,dict) or not isinstance(current,dict):
+        return False
+    def content_identity(identity):
+        result=dict(identity)
+        for name in ('source','seed'):
+            value=result.get(name)
+            if isinstance(value,dict):
+                result[name]={key:item for key,item in value.items() if key!='mtime_ns'}
+        return result
+    return content_identity(saved)==content_identity(current)
 
 
 def cloud_context(config):
@@ -569,7 +599,7 @@ def _run_locked(config, stop, progress):
                 part.get('empty_recognition_requires_review') or part.get('draft_timing_requires_review')
                 for part in state.get('parts',{}).values()):
             raise ValueError('项目含尚未确认无对白的草稿片段，需保持草稿模式并人工复核，不能复用为样片或已审核整片')
-        if state.get('identity') != identity:
+        if not _task_identity_matches(state.get('identity'),identity):
             raise ValueError('输入文件或语言/切段配置发生变化，请选择一个新的项目文件夹')
         chunks = [Chunk(**chunk) for chunk in state['chunks']]
         validate_chunk_plan(chunks,state['duration_ms'])
@@ -578,7 +608,7 @@ def _run_locked(config, stop, progress):
     else:
         preparing = project/'prepare.json'
         if preparing.exists():
-            if json.loads(preparing.read_text(encoding='utf-8')) != identity:
+            if not _task_identity_matches(json.loads(preparing.read_text(encoding='utf-8')),identity):
                 raise ValueError('这个目录正在准备不同的输入，请选择新项目')
             if any(p.name not in ('run.lock','run.guard.lock','prepare.json','silence.log') for p in project.iterdir()):
                 raise ValueError('准备目录有不属于本任务的文件，请选择新项目')

@@ -51,7 +51,8 @@ def _read_output(stdout, stderr, allowance):
     return out.decode('utf-8', errors='replace'), err.decode('utf-8', errors='replace')
 
 
-def capture_process(args, *, stop=None, timeout=60, max_output_bytes=4 * 1024 * 1024, cwd=None):
+def capture_process(args, *, stop=None, timeout=60, max_output_bytes=4 * 1024 * 1024, cwd=None,
+                    stdin=None):
     """Run without a window; always reap the child before returning or raising.
 
     ``max_output_bytes`` is the combined stdout/stderr limit. Output is spooled
@@ -59,7 +60,9 @@ def capture_process(args, *, stop=None, timeout=60, max_output_bytes=4 * 1024 * 
     fill OS pipes or force unbounded in-memory capture. All returned/error output
     is decoded as UTF-8. A stop signal raises ``runner.Cancelled``; timeout and
     nonzero exits preserve subprocess exceptions, and excess output raises
-    ``OutputLimitExceeded``.
+    ``OutputLimitExceeded``. ``stdin`` may be a caller-owned readable file;
+    the caller keeps it open for this call and remains responsible for closing
+    it. The default gives the child an empty DEVNULL input stream.
     """
     if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
         raise ValueError('本地进程超时必须为正的有限秒数')
@@ -72,7 +75,8 @@ def capture_process(args, *, stop=None, timeout=60, max_output_bytes=4 * 1024 * 
         raise Cancelled('已停止本地媒体检查')
     deadline = time.monotonic() + timeout
     with tempfile.TemporaryFile(mode='w+b') as stdout, tempfile.TemporaryFile(mode='w+b') as stderr:
-        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+        child = subprocess.Popen(command, stdin=subprocess.DEVNULL if stdin is None else stdin,
+                                 stdout=stdout, stderr=stderr,
                                  cwd=cwd, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         try:
             with owned_process(child):

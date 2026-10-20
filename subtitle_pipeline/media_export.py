@@ -17,6 +17,7 @@ import time
 
 from . import runner as r
 from . import environment
+from . import file_observation
 from .integrity import fingerprint, sha256
 from .export_progress import ExportProgress
 from .export_io import (cancellable_sha256, cancellable_copy, copy_and_hash,
@@ -343,41 +344,14 @@ def _check_export_stop(stop,cause=None):
 
 
 def _windows_file_change_time(descriptor):
-    """Read NTFS metadata change time; Windows stat ctime is creation time."""
-    import ctypes
-    from ctypes import wintypes
-    import msvcrt
-    class FileBasicInfo(ctypes.Structure):
-        _fields_=[('CreationTime',ctypes.c_longlong),('LastAccessTime',ctypes.c_longlong),
-                  ('LastWriteTime',ctypes.c_longlong),('ChangeTime',ctypes.c_longlong),
-                  ('FileAttributes',wintypes.DWORD)]
-    query=ctypes.WinDLL('kernel32',use_last_error=True).GetFileInformationByHandleEx
-    query.argtypes=[wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD]
-    query.restype=wintypes.BOOL
-    info=FileBasicInfo()
-    if not query(msvcrt.get_osfhandle(descriptor),0,ctypes.byref(info),ctypes.sizeof(info)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if info.ChangeTime<=0:
-        raise OSError('无法读取成片的有效文件更改时间，未复用成片')
-    return info.ChangeTime
+    return file_observation.windows_file_change_time(descriptor)
 
 
 def _final_file_token(final):
-    def stamp(stat):
-        return stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns
-    before=stamp(final.stat())
-    if os.name!='nt':return before
-    # Observe metadata only, without an extra content read or Path.open handle.
-    descriptor=os.open(final,os.O_RDONLY|os.O_BINARY)
     try:
-        opened=stamp(os.fstat(descriptor))
-        changed=_windows_file_change_time(descriptor)
-        if (opened[:4]!=before[:4] or stamp(os.fstat(descriptor))!=opened
-                or stamp(final.stat())!=before):
-            raise ValueError('校验期间成片发生变化，未复用成片或修复记录')
-        return (*before,changed)
-    finally:
-        os.close(descriptor)
+        return file_observation.file_token(final,change_time=_windows_file_change_time)
+    except ValueError as error:
+        raise ValueError('校验期间成片发生变化，未复用成片或修复记录') from error
 
 
 def _stable_final_hash(final,stop):

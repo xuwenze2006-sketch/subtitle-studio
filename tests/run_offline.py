@@ -1,5 +1,6 @@
 """Run all unit/integration tests with outbound sockets blocked by default."""
 import socket
+import os
 import sys
 import tempfile
 import unittest
@@ -16,7 +17,8 @@ if __name__=='__main__':
     # Windows CI may expose TEMP through an 8.3 alias. Build fixtures with the
     # same canonical paths as the application, including during discovery.
     tempfile.tempdir=str(Path(tempfile.gettempdir()).resolve())
-    with patch.object(socket.socket,'connect',blocked), patch.object(socket.socket,'connect_ex',blocked), \
+    with patch.dict(os.environ, {'SUBTITLE_STUDIO_OFFLINE': '1'}), \
+         patch.object(socket.socket,'connect',blocked), patch.object(socket.socket,'connect_ex',blocked), \
          patch.object(socket,'create_connection',blocked):
         suite=unittest.defaultTestLoader.discover(str(Path(__file__).parent))
         result=unittest.TextTestRunner(verbosity=1).run(suite)

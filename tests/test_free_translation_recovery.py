@@ -125,7 +125,7 @@ class FreeTranslationRecoveryTests(unittest.TestCase):
                 folder = self.legacy_bad_result(config)
                 expected = []
 
-                def respond(url):
+                def respond(url, stop_event=None):
                     path = folder / side
                     path.write_text(path.read_text(encoding='utf-8').replace('…', '。'), encoding='utf-8')
                     expected.append(self.translation_copy_bytes(folder))
@@ -150,7 +150,7 @@ class FreeTranslationRecoveryTests(unittest.TestCase):
                 folder = self.legacy_bad_result(config)
                 expected = []
 
-                def respond(url):
+                def respond(url, stop_event=None):
                     (folder / side).unlink()
                     expected.append(self.translation_copy_bytes(folder))
                     return self.response('你好世界。')
@@ -197,7 +197,7 @@ class FreeTranslationRecoveryTests(unittest.TestCase):
         config = self.config('inflight-valid-edit')
         folder = self.legacy_bad_result(config)
 
-        def respond(url):
+        def respond(url, stop_event=None):
             local = folder / 'target.local.srt'
             local.write_text(local.read_text(encoding='utf-8').replace('…', '人工保留译文。'), encoding='utf-8')
             return self.response('你好世界。')
@@ -253,7 +253,7 @@ class FreeTranslationRecoveryTests(unittest.TestCase):
                 folder = self.legacy_bad_result(config)
                 expected = []
 
-                def respond(url):
+                def respond(url, stop_event=None):
                     local = folder / 'target.local.srt'
                     local.write_text(local.read_text(encoding='utf-8').replace('…', '。'), encoding='utf-8')
                     expected.append(self.translation_copy_bytes(folder))
@@ -309,7 +309,7 @@ class FreeTranslationRecoveryTests(unittest.TestCase):
     def test_omitted_batch_item_falls_back_to_its_own_cue(self):
         queries = []
 
-        def respond(url):
+        def respond(url, stop_event=None):
             query = parse_qs(urlparse(url).query)['q'][0]
             queries.append(query)
             if query.startswith('[[S0000]]'):

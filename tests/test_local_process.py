@@ -64,6 +64,19 @@ class LocalCaptureTests(unittest.TestCase):
         self.assertEqual(result.stdout, 'a' * 100000)
         self.assertEqual(result.stderr, 'b' * 100000)
 
+    def test_caller_owned_stdin_file_is_read_without_closing_it(self):
+        with tempfile.TemporaryFile(mode='w+b') as source:
+            source.write('私密字幕输入'.encode('utf-8'))
+            source.seek(0)
+            result = self.module.capture_process(self.command(
+                "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"),
+                stdin=source, timeout=3)
+            self.assertFalse(source.closed)
+            source.seek(0)
+            self.assertEqual(source.read(), '私密字幕输入'.encode('utf-8'))
+        self.assertEqual(result.stdout, '私密字幕输入')
+        self.assertEqual(result.stderr, '')
+
     def test_nonzero_exit_preserves_return_code_and_decoded_diagnostics(self):
         children = self.track_children()
         args = self.command("import sys; print('标准输出'); print('诊断错误',file=sys.stderr); sys.exit(7)")

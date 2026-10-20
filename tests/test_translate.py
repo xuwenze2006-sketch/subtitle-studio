@@ -32,7 +32,7 @@ class TranslationTests(unittest.TestCase):
             raise RuntimeError('cancelled')
 
     def test_mapping_preserves_multiline_cues_and_duplicate_positions(self):
-        def respond(url):
+        def respond(url, stop_event=None):
             value = parse_qs(urlparse(url).query)['q'][0]
             return {'First\nline.': [[['第一行。', value, None, None]], None, 'en'],
                     'Second.': [[['第二行。', value, None, None]], None, 'en']}[value]
@@ -58,7 +58,7 @@ class TranslationTests(unittest.TestCase):
     def test_http_403_switches_to_fallback_for_remaining_cues(self):
         bodies = []
         errors = []
-        def respond(url):
+        def respond(url, stop_event=None):
             host = urlparse(url).hostname
             if host == 'translate.googleapis.com':
                 body = io.BytesIO(b'Access denied')
@@ -91,7 +91,7 @@ class TranslationTests(unittest.TestCase):
                 self.assertFalse(self.cache.exists())
 
     def test_timeout_retries_are_bounded_and_partial_progress_is_saved(self):
-        def respond(url):
+        def respond(url, stop_event=None):
             if parse_qs(urlparse(url).query)['q'] == ['first']:
                 return [[['第一', 'first', None, None]], None, 'en']
             raise TimeoutError('timed out')
@@ -111,7 +111,7 @@ class TranslationTests(unittest.TestCase):
 
     def test_cancel_during_request_stops_without_saving_incomplete_output(self):
         event = threading.Event()
-        def respond(url):
+        def respond(url, stop_event=None):
             event.set()
             return [[['第一', 'first', None, None]], None, 'en']
         with patch.object(self.module, '_request_json', side_effect=respond):
@@ -142,7 +142,7 @@ class TranslationTests(unittest.TestCase):
         starts = []
         def wait(seconds, event):
             clock[0] += seconds
-        def respond(url):
+        def respond(url, stop_event=None):
             starts.append(clock[0])
             return [[['译文', 'source', None, None]], None, 'en']
         with patch.object(self.module.time, 'monotonic', side_effect=lambda: clock[0]), \
@@ -153,7 +153,7 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(starts, [100.0, 100.5, 101.0])
 
     def test_batch_ids_restore_order_and_repeated_cues_are_not_sent_twice(self):
-        def respond(url):
+        def respond(url, stop_event=None):
             value = parse_qs(urlparse(url).query)['q'][0]
             self.assertEqual(value.count('Hello.'), 1)
             return [[['[[S0001]]再见。[[E0001]]\n[[S0000]]你好。[[E0000]]', value, None, None]], None, 'en']
@@ -170,7 +170,7 @@ class TranslationTests(unittest.TestCase):
         for batch_text in bad_batches:
             with self.subTest(batch_text=batch_text):
                 cache = self.cache.parent / (str(len(list(self.cache.parent.iterdir()))) + '.json')
-                def respond(url):
+                def respond(url, stop_event=None):
                     value = parse_qs(urlparse(url).query)['q'][0]
                     result = batch_text if '[[S0000]]' in value else {'Hello.': '你好。', 'Bye.': '再见。'}[value]
                     return [[[result, value, None, None]], None, 'en']
@@ -182,7 +182,7 @@ class TranslationTests(unittest.TestCase):
 
     def test_batches_obey_length_and_count_bounds(self):
         queries = []
-        def respond(url):
+        def respond(url, stop_event=None):
             value = parse_qs(urlparse(url).query)['q'][0]
             queries.append(value)
             return [[[value, value, None, None]], None, 'en']

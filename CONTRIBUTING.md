@@ -28,6 +28,8 @@ npm run build
 
 `python tests/run_offline.py` 默认拦截外网 socket。少量 HTTP 用例只连接各自临时启动的 `127.0.0.1` 服务。`tests/studio_http_smoke.py` 使用临时凭据目录检查 Windows DPAPI、会话、Range 和跨域拒绝，不调用识别服务。
 
+免费翻译请求在受控 Python 子进程中执行。测试入口传递 `SUBTITLE_STUDIO_OFFLINE=1`，worker 仅允许回环 IP 字面地址，禁用代理并逐跳检查重定向；新增请求子进程时也必须传递离线限制，父进程的 socket 替代函数不会自动进入子进程。拒绝网络的测试应另断言网络函数未被调用，不能只检查脱敏后的错误类型。
+
 `npm test` 的默认单 worker 模式降低内存消耗。若整机资源不足导致超时，保留失败日志并先停止自己启动的并行验证，区分调度压力和真正的异步竞态；不要把一次失败隐藏为自动重试成功，也不要通过放宽产品断言掩盖问题。
 
 需要检查真实压制时，可显式运行 `python tests/media_smoke.py`。它生成合成素材，需要 FFmpeg/libass 与 Intel QSV；结果位于忽略的 `验证样例/`。通过离线测试不证明真实服务质量、当前报价、人工审核结果或特定硬件可用。
