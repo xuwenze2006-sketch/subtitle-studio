@@ -35,12 +35,13 @@ export function getReviewSubmissions(owner, projectKey) {
     getSnapshot: () => version,
     pending: sample => operations.get(sample)?.status === "pending",
     hasPending: () => [...operations.values()].some(operation => operation.status === "pending"),
+    peekSubmission: sample => operations.get(sample),
     peekResult: sample => {
       const operation=operations.get(sample);
       return operation?.status !== 'pending' ? operation : null;
     },
-    submit(sample, draft, request) {
-      const operation = { sample, cueId: draft.cueId, revision: draft.revision, fields: { ...draft.fields }, status: "pending" };
+    submit(sample, draft, request, { advance = false } = {}) {
+      const operation = { sample, cueId: draft.cueId, revision: draft.revision, fields: { ...draft.fields }, advance, status: "pending" };
       return submit(sample, operation, request);
     },
     submitAcceptance(sample, revision, request) {

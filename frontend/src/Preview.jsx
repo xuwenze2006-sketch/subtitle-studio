@@ -121,6 +121,10 @@ function PreviewSession({
   const restoreReviewDraft = useCallback(data => {
     const current = reviewDraftRef.current;
     if (isReviewDirty(current)) return;
+    // A fresh read can already contain the saved revision. Retain the exact
+    // submitted editor state until its save-and-next acknowledgement is used.
+    const submission = reviewSubmissions.peekSubmission(data.selected_id);
+    if (submission?.advance && submission.status !== "error" && matchesSubmittedFields(current, submission)) return;
     const recovered = readReviewDraft(projectKey, data.selected_id);
     setDraftStorageWarning(recovered.error ? "本机草稿读取失败，当前编辑和保存仍可继续。" : "");
     if (recovered.draft) {
@@ -131,7 +135,7 @@ function PreviewSession({
       const cue = data.cues.find(item => item.id === current.cueId);
       setReviewDraft(cue ? createReviewDraft(cue, data.manual_review.revision, data.selected_id) : null);
     }
-  }, [projectKey]);
+  }, [projectKey, reviewSubmissions]);
   useEffect(() => {
     const preventDraftLoss = event => {
       if (!reviewDirty && !hasPendingReviewSubmissions(submissionOwner)) return;
@@ -147,7 +151,6 @@ function PreviewSession({
   const downloadRequest = useRef(null);
   const taskRefreshRequest = useRef(0);
   const replayRange = useRef(null);
-  const advanceAfterSave = useRef(null);
   const refreshTaskState = useCallback(async (savedMessage) => {
     const version = requestVersion.current;
     const request = ++taskRefreshRequest.current;
@@ -262,8 +265,6 @@ function PreviewSession({
     if (!preview && (pendingReceipt?.data?.kind === 'review-cue' || pendingReceipt?.kind === "accept")) return;
     const submission = reviewSubmissions.takeResult(selectedId);
     if (!submission) return;
-    const advance = advanceAfterSave.current;
-    advanceAfterSave.current = null;
     if (submission.status === "error") {
       const message = submission.error.message;
       setReviewError(message);
@@ -307,8 +308,7 @@ function PreviewSession({
       return;
     }
     const savedCueIndex = data.cues.findIndex(cue => cue.id === submission.cueId);
-    const shouldAdvance = advance?.sample === selectedId && advance.cueId === submission.cueId &&
-      advance.revision === submission.revision && matchesSubmittedFields(reviewDraft, submission) &&
+    const shouldAdvance = submission.advance && submission.sample === selectedId && matchesSubmittedFields(reviewDraft, submission) &&
       data.cues[savedCueIndex]?.review_status === "checked";
     const unchecked = shouldAdvance ? data.cues.map((cue, index) => ({cue, index})).filter(({cue}) =>
       !cue.review_status || cue.review_status === "unchecked") : [];
@@ -624,10 +624,9 @@ function PreviewSession({
     ++taskRefreshRequest.current;
     setReviewError("");
     setReviewNotice("");
-    const submitted = reviewSubmissions.submit(selectedId, reviewDraft, () => api.request("/api/review-cue", { project_id: preview.project_id, sample: selectedId, response_mode:'cue', expected_revision: reviewDraft.revision,
+    reviewSubmissions.submit(selectedId, reviewDraft, () => api.request("/api/review-cue", { project_id: preview.project_id, sample: selectedId, response_mode:'cue', expected_revision: reviewDraft.revision,
         cue_id: reviewDraft.cueId, start_ms: start, end_ms: end, source_text: fields.source_text, target_text: fields.target_text,
-        review_status: finalStatus, note: fields.note, translation_confirmed: fields.translation_confirmed }));
-    if (submitted) advanceAfterSave.current = advance ? {sample:selectedId, cueId:reviewDraft.cueId, revision:reviewDraft.revision} : null;
+        review_status: finalStatus, note: fields.note, translation_confirmed: fields.translation_confirmed }), { advance });
   };
   const acceptReview = () => {
     if (!supportsReview || selectedId !== "main" || disabled || loading || reviewBusy || reviewDirty || snapshot?.job?.busy || reviewConflict || draftConflict || !preview.manual_review.summary?.can_accept) return;

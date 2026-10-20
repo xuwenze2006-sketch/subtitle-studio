@@ -163,6 +163,7 @@ class StudioController:
         self._persist_revision=0
         self._persist_result_revision=0
         self._closing=False
+        self._active_requests=0
         summaries=saved.get('last_runs',{})
         self._last_runs={}
         if isinstance(summaries,dict):
@@ -423,13 +424,28 @@ class StudioController:
 
     def idle_ready(self):
         with self.lock:
-            return not self._closing and not self.job['busy'] and not self._persist_active and self._persist_pending is None
+            return not self._closing and not self._active_requests and not self.job['busy'] and not self._persist_active and self._persist_pending is None
 
     def touch(self,server):
         with self.lock:
             if self._closing:return False
             server.last_touch=time.monotonic()
             return True
+
+    def begin_request(self,server):
+        # Authentication precedes admission. Hold the same lock as the idle
+        # claim so either this request or shutdown owns the next transition.
+        with self.lock:
+            if self._closing:return False
+            self._active_requests+=1
+            server.last_touch=time.monotonic()
+            return True
+
+    def end_request(self,server):
+        with self.lock:
+            if self._active_requests:
+                self._active_requests-=1
+                server.last_touch=time.monotonic()
 
     def claim_idle_shutdown(self,server):
         # Task admission and the final idle decision share one lock. Once
@@ -602,18 +618,23 @@ class StudioController:
         return bool(approval.get('manual_revision') and
                     not self._contained_path(self._contained_path(folder,'人工校对'),'校对记录.json').exists())
 
+    def _project_created_at(self,previous=None):
+        if not self.campaign:return ''
+        recent=next((x for x in self.recent if x['path']==self.campaign),{})
+        previous=self._saved_state() if previous is None else previous
+        created=recent.get('created') or previous.get('created')
+        if type(created) in (int,float) and math.isfinite(created) and created>0:
+            try:return datetime.fromtimestamp(created).astimezone().isoformat(timespec='seconds')
+            except (ValueError,OSError,OverflowError):pass
+        return ''
+
     def _file_layout_data(self,previous=None):
         result={'source_path':self.source,'project_path':self.campaign,
                 'exports_path':'','created_at':'','video_path':''}
         if not self.campaign:return result
         project=self._project_path()
         result['exports_path']=str(self._contained_path(project,'导出'))
-        recent=next((x for x in self.recent if x['path']==self.campaign),{})
-        previous=self._saved_state() if previous is None else previous
-        created=recent.get('created') or previous.get('created')
-        if type(created) in (int,float) and math.isfinite(created) and created>0:
-            try:result['created_at']=datetime.fromtimestamp(created).astimezone().isoformat(timespec='seconds')
-            except (ValueError,OSError,OverflowError):pass
+        result['created_at']=self._project_created_at(previous)
         video=self._exported_video_path()
         if video:result['video_path']=str(video)
         return result
@@ -1352,7 +1373,7 @@ class StudioController:
                     selected.update(track_folder=revision['folder'],manual_review={
                         'revision':revision['revision'],'summary':revision['summary'],'binding':revision['binding']})
                 return save_subtitle_snapshot(project,Path(self.source),selected,
-                    created_at=self._file_layout_data()['created_at'])
+                    created_at=self._project_created_at())
 
     def _download_path(self,name,sample=None):
         selected,_=self._preview_selection(sample)
@@ -1470,9 +1491,22 @@ def make_handler(controller,token,host,static_dir):
             self.rfile=reader
 
         def handle_one_request(self):
-            self.rfile.begin_read(self.server.request_timeout)
-            try:return super().handle_one_request()
-            finally:self.rfile.end_read()
+            self._api_request_active=False
+            try:
+                self.rfile.begin_read(self.server.request_timeout)
+                return super().handle_one_request()
+            finally:
+                try:self.rfile.end_read()
+                finally:
+                    if self._api_request_active:
+                        self._api_request_active=False
+                        controller.end_request(self.server)
+
+        def begin_api_request(self):
+            if getattr(self,'_api_request_active',False):return True
+            if not controller.begin_request(self.server):return False
+            self._api_request_active=True
+            return True
 
         def parse_request(self):
             try:return super().parse_request()
@@ -1528,7 +1562,7 @@ def make_handler(controller,token,host,static_dir):
             if self.headers.get('Host')!=host:return self.json_response({'error':'本机地址不匹配'},403)
             if path.startswith('/api/'):
                 if not authorize_request(self.headers,token,host):return self.json_response({'error':'请从桌面入口重新打开程序'},403)
-                if not controller.touch(self.server):return self.json_response({'error':'本机服务正在退出，请重新打开工作台后继续。'},503)
+                if not self.begin_api_request():return self.json_response({'error':'本机服务正在退出，请重新打开工作台后继续。'},503)
                 try:
                     query=parse_qs(parsed.query,keep_blank_values=True)
                     sample=query.get('sample',[None])[0]
@@ -1561,7 +1595,7 @@ def make_handler(controller,token,host,static_dir):
 
         def do_POST(self):
             if not authorize_request(self.headers,token,host):return self.json_response({'error':'本机请求校验失败，请从桌面入口重新打开'},403)
-            if not controller.touch(self.server):return self.json_response({'error':'本机服务正在退出，请重新打开工作台后继续。'},503)
+            if not self.begin_api_request():return self.json_response({'error':'本机服务正在退出，请重新打开工作台后继续。'},503)
             if self.headers.get('Content-Type','').split(';')[0]!='application/json':return self.json_response({'error':'需要JSON请求'},415)
             try:
                 length=int(self.headers.get('Content-Length','0'))
