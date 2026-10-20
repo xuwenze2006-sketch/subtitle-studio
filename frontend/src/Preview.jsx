@@ -22,6 +22,7 @@ import CueTimeline from "./CueTimeline";
 import CueLocator from "./CueLocator";
 import ManualReview, { createReviewDraft, isReviewDirty, parseReviewTime } from "./ManualReview";
 import { getReviewSubmissions, hasPendingReviewSubmissions, matchesSubmittedDraft, matchesSubmittedFields } from "./reviewSubmissions";
+import { getSubtitleVersions } from "./subtitleVersions";
 import { applyReviewReceipt } from './reviewReceipt';
 import { createCuePlaybackIndex } from './cuePlaybackIndex';
 import { readReviewDraft, writeReviewDraft, clearReviewDraft } from "./reviewDraftStorage";
@@ -63,14 +64,14 @@ function PreviewSession({
   const submissionOwner = sessionMemory || localSession.current;
   const [reviewSubmissions] = useState(() => getReviewSubmissions(submissionOwner, projectKey));
   const submissionVersion = useSyncExternalStore(reviewSubmissions.subscribe, reviewSubmissions.getSnapshot);
+  const [subtitleVersions] = useState(() => getSubtitleVersions(submissionOwner, projectKey));
+  const versionSnapshot = useSyncExternalStore(subtitleVersions.subscribe, subtitleVersions.getSnapshot);
   const [preview, setPreview] = useState(null);
   const [loading, setLoading] = useState(false);
   const [time, setTime] = useState(restoredSession?.time ?? 0);
   const [mediaFailed, setMediaFailed] = useState(false);
   const [download, setDownload] = useState("");
   const [downloaded, setDownloaded] = useState("");
-  const [savingVersion, setSavingVersion] = useState(false);
-  const [savedVersion, setSavedVersion] = useState(null);
   const [playing, setPlaying] = useState(false);
   const [recentCue, setRecentCue] = useState(-1);
   const [completedReplay, setCompletedReplay] = useState(null);
@@ -92,6 +93,12 @@ function PreviewSession({
   const [draftStorageWarning, setDraftStorageWarning] = useState("");
   const reviewDraftRef = useRef(reviewDraft);
   const selectedId = preview?.selected_id || selection || selections[0]?.id || "main";
+  const savingVersion = subtitleVersions.pending(selectedId);
+  const savedVersion = subtitleVersions.receipt(selectedId);
+  useEffect(() => {
+    const error = subtitleVersions.takeError(selectedId);
+    if (error) onError(error.message);
+  }, [subtitleVersions, versionSnapshot, selectedId, onError]);
   const reviewBusy = reviewActionBusy || reviewSubmissions.pending(selectedId);
   const reviewPending = hasPendingReviewSubmissions(submissionOwner);
   const reviewDirty = isReviewDirty(reviewDraft);
@@ -138,7 +145,6 @@ function PreviewSession({
   const restorePosition = useRef(restoredSession?.time ?? null);
   const requestVersion = useRef(0);
   const downloadRequest = useRef(null);
-  const versionSaveRequest = useRef(null);
   const taskRefreshRequest = useRef(0);
   const replayRange = useRef(null);
   const advanceAfterSave = useRef(null);
@@ -157,12 +163,10 @@ function PreviewSession({
     video.current?.pause();
     requestVersion.current += 1;
     downloadRequest.current = null;
-    versionSaveRequest.current = null;
   }, []);
   useEffect(() => {
     const version = ++requestVersion.current;
     downloadRequest.current = null;
-    versionSaveRequest.current = null;
     const controller = new AbortController();
     video.current?.pause();
     replayRange.current = null;
@@ -170,8 +174,6 @@ function PreviewSession({
     setTime(restorePosition.current ?? 0);
     setDownload("");
     setDownloaded("");
-    setSavingVersion(false);
-    setSavedVersion(null);
     setPlaying(false);
     setRecentCue(-1);
     setCompletedReplay(null);
@@ -382,7 +384,6 @@ function PreviewSession({
     if (reviewDirty) { setReviewNotice("有未保存修改，请先保存或放弃后再切换片段。"); return; }
     ++requestVersion.current;
     downloadRequest.current = null;
-    versionSaveRequest.current = null;
     video.current?.pause();
     replayRange.current = null;
     restorePosition.current = null;
@@ -391,8 +392,6 @@ function PreviewSession({
     setRecentCue(-1);
     setCompletedReplay(null);
     setDownloaded("");
-    setSavingVersion(false);
-    setSavedVersion(null);
     setReviewDraft(null);
     setReviewFilter("all");
     setReviewBusy(false);
@@ -505,7 +504,7 @@ function PreviewSession({
   };
   const save = async (name) => {
     if (reviewDirty || reviewBusy || reviewSubmissions.pending(selectedId)) { setReviewNotice("请先保存本句修改，并等待保存完成后再导出字幕。"); return; }
-    if (disabled || loading || downloadRequest.current || versionSaveRequest.current || !preview) return;
+    if (disabled || loading || downloadRequest.current || subtitleVersions.pending(selectedId) || !preview) return;
     // Review acknowledgements invalidate stale preview reads, not this export.
     const request = {};
     downloadRequest.current = request;
@@ -523,24 +522,12 @@ function PreviewSession({
       }
     }
   };
-  const saveVersion = async () => {
+  const saveVersion = event => {
+    if (event.detail > 1) return;
     if (reviewDirty || reviewBusy || reviewSubmissions.pending(selectedId)) { setReviewNotice("请先保存本句修改，并等待保存完成后再导出字幕。"); return; }
-    if (!supportsFileVersions || disabled || loading || downloadRequest.current || versionSaveRequest.current || snapshot?.job?.busy || !preview) return;
-    const request = {};
-    versionSaveRequest.current = request;
-    setSavingVersion(true);
-    setSavedVersion(null);
-    try {
-      const result = await api.request("/api/save-subtitles", { project_id: preview.project_id, sample: selectedId });
-      if (versionSaveRequest.current === request) setSavedVersion(result);
-    } catch (error) {
-      if (versionSaveRequest.current === request) onError(error.message);
-    } finally {
-      if (versionSaveRequest.current === request) {
-        versionSaveRequest.current = null;
-        setSavingVersion(false);
-      }
-    }
+    if (!supportsFileVersions || disabled || loading || downloadRequest.current || snapshot?.job?.busy || !preview) return;
+    subtitleVersions.submit(selectedId, preview.project_id,
+      () => api.request("/api/save-subtitles", { project_id: preview.project_id, sample: selectedId }));
   };
 
   const editCue = useCallback((cue) => {
@@ -805,8 +792,9 @@ function PreviewSession({
             <Captions size={15} />
             <span>点字幕定位；点单句播放可听完即停。{offset > 0 && "字幕时间标注原片位置。"}</span>
           </div>
-          {!!preview?.downloads?.length && (
+          {(!!preview?.downloads?.length || savedVersion?.data?.folder) && (
             <div className="downloads">
+              {!!preview?.downloads?.length && <>
               <h3>导出字幕文件</h3>
               <div>
                 {preview.downloads.map((name) => (
@@ -828,11 +816,12 @@ function PreviewSession({
                 <span>{supportsFileVersions ? "在项目内保留一份带时间的副本" : "重启字幕工坊后可使用版本保存"}</span>
               </div>
               {(reviewDirty || reviewBusy) && <p className="file-naming-hint">请先保存本句修改，并等待保存完成后再导出字幕。</p>}
-              {savedVersion?.folder && <div className="subtitle-version-receipt" role="status">
+              </>}
+              {savedVersion?.data?.folder && <div className="subtitle-version-receipt" role="status">
                 <strong>字幕版本已保存</strong>
-                <span className="saved-version-path">{savedVersion.folder}</span>
+                <span className="saved-version-path">{savedVersion.data.folder}</span>
                 <small>保留当前字幕与审核状态；保存版本不代表内容已校对。</small>
-                <Button icon={FolderOpen} disabled={disabled} onClick={() => open("exports", preview.project_id)}>打开导出目录</Button>
+                <Button icon={FolderOpen} disabled={disabled} onClick={() => open("exports", savedVersion.projectId)}>打开导出目录</Button>
               </div>}
               {downloaded && <p className="preview-download-receipt" role="status">已交给浏览器：{downloaded}。可在浏览器下载记录中查看。</p>}
             </div>

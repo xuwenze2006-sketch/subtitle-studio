@@ -280,7 +280,20 @@ class StudioController:
     def _output_dir(self):
         project=self._project_path()
         full=self._contained_path(project,'整片')
-        return full if self._contained_path(full,'state.json').is_file() else project
+        state=self._contained_path(full,'state.json')
+        if state.is_file():return full
+        manifest=read_json(self._contained_path(project,'campaign.json'))
+        if not manifest:return project
+        try:self._validate_loaded_project(project,{},manifest)
+        except ValueError:return project
+        # A known cloud campaign owns this fixed output location even when its
+        # state is lost. Arbitrary nested folders do not identify cloud results.
+        target=manifest_languages(manifest)[1]
+        return full if state.exists() or self._has_output_artifacts(full,target) else project
+
+    def _has_output_artifacts(self,folder,target):
+        names=(*output_names(target),'需复核.json',Path('人工校对')/'校对记录.json')
+        return any(self._contained_path(folder,name).exists() for name in names)
 
     @staticmethod
     def _contained_path(parent,name):
@@ -526,6 +539,10 @@ class StudioController:
         """Read project display data separately from the host's connection state."""
         manifest=read_json(self._project_path()/'campaign.json',strict=True) if self.campaign else {}
         previous=self._saved_state(strict=True)
+        if manifest and not previous:
+            folder=self._output_dir()
+            if folder!=self._project_path() and self._has_output_artifacts(folder,manifest_languages(manifest)[1]):
+                raise ValueError('已有整片结果缺少项目状态，请保留原文件并恢复记录')
         config=previous.get('config',{})
         if not isinstance(config,dict):raise ValueError('项目配置不是对象')
         if 'identity' in previous and not isinstance(previous['identity'],dict):raise ValueError('项目身份不是对象')
