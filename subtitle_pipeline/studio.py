@@ -137,6 +137,7 @@ class StudioController:
     def __init__(self,*,source='',campaign='',baseline='',state_path=None):
         self.lock=threading.RLock()
         self._selection_revision=0
+        self._configuration_revision=0
         self._track_cache=SrtReadCache()
         self._video_checks=(threading.Lock(),{})
         self.state_path=Path(state_path) if state_path else data_directory()/'studio.json'
@@ -238,6 +239,19 @@ class StudioController:
                 not hmac.compare_digest(project_id,self._project_id())):
             raise ProjectSelectionChanged('其他窗口已切换项目，请刷新当前结果后再操作')
 
+    def _snapshot_view_locked(self):
+        view=object.__new__(type(self))
+        view.lock=threading.RLock()
+        view.source=self.source
+        view.campaign=self.campaign
+        view.baseline=self.baseline
+        view.job=deepcopy(self.job)
+        view.recent=deepcopy(self.recent)
+        view.persistence_warning=self.persistence_warning
+        view._track_cache=self._track_cache
+        view._video_checks=self._video_checks
+        return view
+
     def _read_view(self,reader,project_id=None,finish=None):
         # File reads and parsing must not hold the live controller lock needed
         # by stop/progress. Only immutable paths and isolated display data cross
@@ -245,16 +259,7 @@ class StudioController:
         with self.lock:
             self._assert_project(project_id)
             revision=self._selection_revision
-            view=object.__new__(type(self))
-            view.lock=threading.RLock()
-            view.source=self.source
-            view.campaign=self.campaign
-            view.baseline=self.baseline
-            view.job=deepcopy(self.job)
-            view.recent=deepcopy(self.recent)
-            view.persistence_warning=self.persistence_warning
-            view._track_cache=self._track_cache
-            view._video_checks=self._video_checks
+            view=self._snapshot_view_locked()
         succeeded=False
         try:
             result=reader(view)
@@ -669,7 +674,9 @@ class StudioController:
             key=data.get('key','')
             if not isinstance(key,str) or len(key)>8192 or any(ch.isspace() or ord(ch)<32 or ord(ch)==127 for ch in key):
                 raise ValueError('API Key 格式无效，请检查空格和换行')
-            if key:save_secrets({PROVIDERS[provider]:key})
+            if key:
+                save_secrets({PROVIDERS[provider]:key})
+                self._configuration_revision+=1
             elif not account_environment().get(PROVIDERS[provider]):raise ValueError('请先填写 API Key')
             return {'saved':True,'provider':provider,'message':'已加密保存到本机，重启后自动读取；没有发起模型请求。'}
 
@@ -685,6 +692,7 @@ class StudioController:
             write_public_environment({'SILICONFLOW_ASR_CNY_PER_SECOND':str(settings.price_per_second),
                 'SILICONFLOW_PRICING_VERIFIED_ON':settings.verified_on,
                 'SILICONFLOW_PRICING_REFERENCE':settings.pricing_reference})
+            self._configuration_revision+=1
             return {'saved':True,'settings':settings.public_config(),'message':'已保存当前账户价格；没有发起模型请求。'}
 
     def save_settings(self,data):
@@ -700,6 +708,7 @@ class StudioController:
             settings=cloud_settings.load_settings(validation)
             normalized=settings.public_config()
             write_public_environment({name:str(normalized[field]) for field,name in SETTINGS.items()})
+            self._configuration_revision+=1
             return {'saved':True,'settings':normalized,'message':'已保存当前核价记录；没有发起模型请求。'}
 
     def _progress_locked(self,data):
@@ -726,44 +735,73 @@ class StudioController:
         with self.lock:self._progress_locked(data)
         self._drain_persistence()
 
+    def _start_payload(self,data):
+        """Validate a detached selection without changing live run state."""
+        action=data.get('action')
+        if action=='local' and self._is_cloud_project():
+            raise ValueError('这个项目属于云端识别，请通过云端流程继续；本地识别请新建任务')
+        state=self._state_data()
+        if action not in state['actions'] or not state['actions'][action] or action in ('stop','review','siliconflow-review'):
+            raise ValueError('当前步骤尚未满足条件，请先配置账户或完成前一步审核')
+        project=self._project_path()
+        if action in ('local','prepare','samples') and not Path(self.source).is_file():raise ValueError('请选择存在的视频或音频文件')
+        values=account_environment()
+        redactions=[values.get(name,'') for name in PROVIDERS.values()]
+        if action=='local':
+            old=read_json(project/'state.json')
+            if old:
+                if old.get('identity',{}).get('engine')!='whisper_cpp':raise ValueError('这个项目属于云端识别，请通过原引擎继续')
+                config=PipelineConfig(**project_config_from_state(old))
+            else:
+                config=PipelineConfig(Path(self.source),project,language=data.get('language','ja'),
+                    target=data.get('target',default_target(data.get('language','ja'))),
+                    chunk_seconds=data.get('chunk_seconds',300),workers=data.get('workers',1),translate=data.get('translate',False))
+                if config.language not in ('ja','en','zh','auto') or type(config.translate) is not bool or type(config.workers) is not int:
+                    raise ValueError('识别选项无效')
+                if isinstance(config.chunk_seconds,bool) or not isinstance(config.chunk_seconds,(int,float)):
+                    raise ValueError('分段时长无效')
+            validate_config(config)
+            payload=config
+        else:
+            payload=build_command(action,campaign=project,source=self.source,baseline=self.baseline,
+                **({'language':data.get('language',state['project_config'].get('language','ja')),
+                    'target':data.get('target',state['project_config'].get('target',default_target(data.get('language','ja'))))} if action=='prepare' else {}),
+                reviewed=data.get('reviewed'),timing_passed=data.get('timing_passed'),content_passed=data.get('content_passed',False),
+                executable=sys.executable,
+                encoder=data.get('encoder') if action in ('export','export-draft') else None)
+        return action,payload,redactions
+
     def start(self,data):
-        launch_error=None
+        # Capturing a view does not reserve a run. Selection, another run, or
+        # idle shutdown may win while preflight performs filesystem/account I/O.
         with self.lock:
             if self._closing:raise RuntimeError('本机服务正在退出，请重新打开工作台后继续。')
-            self._assert_project(data.get('project_id'))
+            selection=self._selection_revision
+            configuration=self._configuration_revision
+            previous_job=self.job
+            view=self._snapshot_view_locked()
+        request=deepcopy(data)
+        project_id=request.get('project_id')
+        view._assert_project(project_id)
+        if view.job['busy']:raise ValueError('已有任务正在处理')
+        action,payload,redactions=view._start_payload(request)
+        identity=view._project_id()
+        launch_error=None
+        with self.lock:
+            # This is the admission boundary. The strongly referenced job also
+            # detects a competing run that started and finished during preflight.
+            if self._closing:raise RuntimeError('本机服务正在退出，请重新打开工作台后继续。')
+            if selection!=self._selection_revision:
+                raise ProjectSelectionChanged('其他窗口已切换项目，请刷新当前结果后再操作')
+            # The epoch keeps the captured project identity current; rechecking
+            # the token needs no filesystem resolution under the live lock.
+            if project_id is not None and not hmac.compare_digest(project_id,identity):
+                raise ProjectSelectionChanged('其他窗口已切换项目，请刷新当前结果后再操作')
             if self.job['busy']:raise ValueError('已有任务正在处理')
-            action=data.get('action')
-            if action=='local' and self._is_cloud_project():
-                raise ValueError('这个项目属于云端识别，请通过云端流程继续；本地识别请新建任务')
-            state=self.state()
-            if action not in state['actions'] or not state['actions'][action] or action in ('stop','review','siliconflow-review'):
-                raise ValueError('当前步骤尚未满足条件，请先配置账户或完成前一步审核')
-            project=self._project_path()
-            if action in ('local','prepare','samples') and not Path(self.source).is_file():raise ValueError('请选择存在的视频或音频文件')
-            values=account_environment()
-            self._redactions=[values.get(name,'') for name in PROVIDERS.values()]
-            if action=='local':
-                old=read_json(project/'state.json')
-                if old:
-                    if old.get('identity',{}).get('engine')!='whisper_cpp':raise ValueError('这个项目属于云端识别，请通过原引擎继续')
-                    config=PipelineConfig(**project_config_from_state(old))
-                else:
-                    config=PipelineConfig(Path(self.source),project,language=data.get('language','ja'),
-                        target=data.get('target',default_target(data.get('language','ja'))),
-                        chunk_seconds=data.get('chunk_seconds',300),workers=data.get('workers',1),translate=data.get('translate',False))
-                    if config.language not in ('ja','en','zh','auto') or type(config.translate) is not bool or type(config.workers) is not int:
-                        raise ValueError('识别选项无效')
-                    if isinstance(config.chunk_seconds,bool) or not isinstance(config.chunk_seconds,(int,float)):
-                        raise ValueError('分段时长无效')
-                validate_config(config)
-                payload=config
-            else:
-                payload=build_command(action,campaign=project,source=self.source,baseline=self.baseline,
-                    **({'language':data.get('language',state['project_config'].get('language','ja')),
-                        'target':data.get('target',state['project_config'].get('target',default_target(data.get('language','ja'))))} if action=='prepare' else {}),
-                    reviewed=data.get('reviewed'),timing_passed=data.get('timing_passed'),content_passed=data.get('content_passed',False),
-                    executable=sys.executable,
-                    encoder=data.get('encoder') if action in ('export','export-draft') else None)
+            if self.job is not previous_job:raise RuntimeError('任务状态已变化，请刷新当前结果后再开始任务。')
+            if configuration!=self._configuration_revision:
+                raise RuntimeError('本机账户或计价配置已变化，请重新确认后再开始任务。')
+            self._redactions=redactions
             self.stop_event=threading.Event()
             self._cancel_marker=(self.state_path.parent/'stops'/(secrets.token_hex(16)+'.stop')) if action!='local' else None
             self.job={**self._idle_job(),'busy':True,'action':action,'status':'starting','message':'正在准备任务…'}

@@ -6,12 +6,13 @@ from pathlib import Path
 
 @contextmanager
 def stable_read_guard(path):
-    """Deny Windows writers/deletion only while a caller hashes this input.
+    """Deny Windows writers/deletion for the caller's entire read lifetime.
 
     ChangeTime can repeat for fast writes, so tokens alone cannot protect a
     content read. Existing readers remain compatible; a preexisting writer or
     delete-access handle prevents protection and must fail before reading.
-    The owned handle is released on exit; later processing is not protected.
+    The owned handle is released on exit. Callers consuming the path again
+    after hashing must hold this guard through their last dependent read.
     """
     if os.name!='nt':
         yield
@@ -41,7 +42,7 @@ def stable_read_guard(path):
     finally:
         if not kernel.CloseHandle(handle):
             code=ctypes.get_last_error()
-            error=ctypes.WinError(code,f'关闭输入文件哈希保护句柄失败（CloseHandle）：{ctypes.FormatError(code).strip()}')
+            error=ctypes.WinError(code,f'关闭输入文件保护句柄失败（CloseHandle）：{ctypes.FormatError(code).strip()}')
             if primary is None:raise error
             primary.add_note(str(error))
 

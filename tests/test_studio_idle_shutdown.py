@@ -53,29 +53,20 @@ class StudioIdleShutdownTests(unittest.TestCase):
         self.assertFalse(self.app.job['busy'])
         self.assertFalse(self.app.state_path.exists())
 
-    def test_admitted_task_wins_controller_lock_and_blocks_shutdown(self):
-        state = self.app.state()
-        entered, release, worker_exit = (threading.Event() for _ in range(3))
-        def validate():
-            entered.set()
-            if not release.wait(3): raise AssertionError('admission not released')
-            return state
+    def test_admitted_worker_blocks_shutdown_after_final_admission(self):
+        worker_started, worker_exit = threading.Event(), threading.Event()
         def run(*args, **kwargs):
+            worker_started.set()
             if not worker_exit.wait(3): raise AssertionError('worker not released')
             return {'status': 'complete'}
-        with patch.object(self.app, 'state', side_effect=validate), \
-                patch.object(studio, 'run_pipeline', side_effect=run), ThreadPoolExecutor(max_workers=2) as pool:
-            started = pool.submit(self.app.start, {'action': 'local'})
+        with patch.object(studio, 'run_pipeline', side_effect=run):
             try:
-                self.assertTrue(entered.wait(2))
-                shutdown = pool.submit(self.app.claim_idle_shutdown, self.server)
-                release.set()
-                self.assertTrue(started.result(timeout=2)['started'])
-                self.assertFalse(shutdown.result(timeout=2))
+                self.assertTrue(self.app.start({'action':'local'})['started'])
+                self.assertTrue(worker_started.wait(2))
+                self.assertFalse(self.app.claim_idle_shutdown(self.server))
                 self.assertTrue(self.app.job['busy'])
                 self.assertTrue(self.app.touch(self.server))
             finally:
-                release.set()
                 worker_exit.set()
                 if self.app.worker is not None: self.app.worker.join(3)
 

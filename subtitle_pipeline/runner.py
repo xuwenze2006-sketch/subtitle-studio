@@ -634,7 +634,19 @@ def run_pipeline(config, stop_event=None, on_progress=None):
     validate_config(config)
     stop = stop_event or threading.Event()
     config.project.mkdir(parents=True, exist_ok=True)
-    with ProjectLock(config.project):
+    # FFmpeg reopens the source after identity and once per local chunk. Keep
+    # the same bytes immutable until all owned work and finalization finish,
+    # so results cannot inherit the identity of a different source generation.
+    with ProjectLock(config.project), ExitStack() as inputs:
+        try:
+            _check_identity_stop(stop)
+            inputs.enter_context(stable_read_guard(config.source))
+        except (OSError,ValueError,Cancelled) as error:
+            # Keep file_identity's cancellation priority, including a stop that
+            # arrives while admission fails. Do not catch later task failures.
+            if isinstance(error,Cancelled) or stop.is_set():
+                return {'status':'cancelled','message':'已停止准备','total':0,'recognized':0,'translated':0}
+            raise
         return _run_locked(config, stop, on_progress or (lambda state: None))
 
 

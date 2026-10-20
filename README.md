@@ -40,6 +40,8 @@ python -m subtitle_pipeline.studio --source "D:\Videos\example.mp4" --campaign "
 4. 下载 SRT 或保存独立字幕版本。MP4 分为“未审核草稿”和“审核版”，审核版需要明确人工验收。
 5. 中断后选择原任务继续。保留原目录、账本、原始响应和锁文件；未知提交状态不会自动重发付费请求。
 
+识别或样片准备期间，Windows 会保护原素材，暂时阻止写入、替换或删除，以免结果关联到错误内容。需要编辑或移动素材时，先停止任务并等待后台运行结束；若提示素材正被写入，请先让编辑器完成保存并关闭占用。
+
 完整行为与限制见[使用指南](docs/使用指南.md)。旧 Tkinter 入口 `python -m subtitle_pipeline.cloud_gui` 和 `python -m subtitle_pipeline.gui` 继续保留。
 
 ## 数据与安全

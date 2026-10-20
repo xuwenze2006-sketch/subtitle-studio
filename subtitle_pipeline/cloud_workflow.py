@@ -153,6 +153,14 @@ def prepare(source,campaign,baseline,stop,*,budget_ledger=None,language='ja',tar
     validate_languages(language,target)
     if stop.is_set():raise r.Cancelled('已停止样片准备')
     source=Path(source).resolve()
+    # FFmpeg reopens this path for timeline audio and every video preview.
+    # Keep those reads on the same source generation as its verified identity.
+    with r.stable_read_guard(source):
+        return _prepare(source,campaign,baseline,stop,budget_ledger=budget_ledger,
+                        language=language,target=target)
+
+
+def _prepare(source,campaign,baseline,stop,*,budget_ledger=None,language='ja',target=None):
     requested_ledger=Path(budget_ledger).resolve() if budget_ledger is not None else None
     existing=campaign/'campaign.json'
     if existing.exists():
