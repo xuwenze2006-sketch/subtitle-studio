@@ -208,18 +208,12 @@ class FakeLedger:
         return json.loads(result.body)
 
 
-class HttpResult:
+class HttpResult(io.BytesIO):
     status = 200
     headers = {"Content-Type": "application/json"}
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def read(self):
-        return json.dumps(response([], 1001)).encode("utf-8")
+    def __init__(self, body=None):
+        super().__init__(json.dumps(response([], 1001)).encode("utf-8") if body is None else body)
 
 
 class AzureTransportTests(unittest.TestCase):
@@ -337,8 +331,7 @@ class AzureTransportTests(unittest.TestCase):
         from subtitle_pipeline.cloud_budget import BudgetLedger
         ledger = BudgetLedger(self.ledger.path)
         original = b' { "durationMilliseconds" : 1001, "phrases" : [] }\n'
-        http = HttpResult()
-        http.read = lambda: original
+        http = HttpResult(original)
         opener = mock.Mock()
         opener.open.return_value = http
         first = Path(self.directory.name) / "project-one" / "raw.json"
@@ -357,8 +350,7 @@ class AzureTransportTests(unittest.TestCase):
         ledger = BudgetLedger(self.ledger.path)
         invalid = {"durationMilliseconds": 1001, "phrases": [],
                    "combinedPhrases": [{"channel": 0, "text": "Recognized text"}]}
-        http = HttpResult()
-        http.read = lambda: json.dumps(invalid).encode("utf-8")
+        http = HttpResult(json.dumps(invalid).encode("utf-8"))
         opener = mock.Mock()
         opener.open.return_value = http
         with mock.patch.object(self.azure.urllib.request, "build_opener", return_value=opener):

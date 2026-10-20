@@ -913,9 +913,19 @@ class WorkflowRegressionTests(unittest.TestCase):
 
     def test_publication_copy_failure_retains_encoded_video_and_leaves_no_final(self):
         final = self.prepare_export()
-        with patch.object(workflow.shutil, 'copyfileobj', side_effect=OSError('disk full')):
+        original_copy=workflow.shutil.copyfileobj
+        partial=self.campaign/'导出'/'result.partial.mp4'
+        failed=[]
+        def publication_failure(source,target,*args):
+            if Path(getattr(source,'source',source).name)==partial:
+                failed.append(partial)
+                raise OSError('disk full')
+            return original_copy(source,target,*args)
+        with patch.object(workflow.shutil, 'copyfileobj', side_effect=publication_failure):
             with self.assertRaises(OSError):
                 workflow.export_video(self.campaign, self.stop)
+        self.assertEqual(failed,[partial])
+        self.assertTrue((partial.parent/'publication-checkpoint.json').is_file())
         self.assertFalse(final.exists())
         self.assertTrue((self.campaign / '导出' / 'result.partial.mp4').exists())
         self.assertEqual([self.source], list(self.source.parent.iterdir()))
@@ -925,7 +935,8 @@ class WorkflowRegressionTests(unittest.TestCase):
         original_copy = workflow.shutil.copyfileobj
         def copy_with_race(source, target, *args):
             original_copy(source, target, *args)
-            final.write_bytes(b'another-writer-file')
+            if Path(getattr(source,'source',source).name).name=='result.partial.mp4':
+                final.write_bytes(b'another-writer-file')
         with patch.object(workflow.shutil, 'copyfileobj', side_effect=copy_with_race):
             with self.assertRaises(FileExistsError):
                 workflow.export_video(self.campaign, self.stop)

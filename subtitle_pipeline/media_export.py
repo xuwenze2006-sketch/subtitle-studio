@@ -11,7 +11,6 @@ from typing import Callable
 import json
 import math
 import os
-import shutil
 import sys
 import tempfile
 import time
@@ -23,6 +22,7 @@ from .export_progress import ExportProgress
 from .export_io import (cancellable_sha256, cancellable_copy, copy_and_hash,
                         rename_with_retry, unlink_with_retry)
 from .copy_space import require_copy_space
+from .atomic_io import cleanup_temporary, replace_with_retry
 from .local_process import capture_process
 from .audio_integrity import (audio_track_descriptors, verify_audio_tracks,
                               audio_evidence_matches, parse_audio_stream_hashes)
@@ -342,6 +342,81 @@ def _check_export_stop(stop,cause=None):
         raise r.Cancelled('已停止导出，已保存的成片和记录保留') from cause
 
 
+def _windows_file_change_time(descriptor):
+    """Read NTFS metadata change time; Windows stat ctime is creation time."""
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+    class FileBasicInfo(ctypes.Structure):
+        _fields_=[('CreationTime',ctypes.c_longlong),('LastAccessTime',ctypes.c_longlong),
+                  ('LastWriteTime',ctypes.c_longlong),('ChangeTime',ctypes.c_longlong),
+                  ('FileAttributes',wintypes.DWORD)]
+    query=ctypes.WinDLL('kernel32',use_last_error=True).GetFileInformationByHandleEx
+    query.argtypes=[wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD]
+    query.restype=wintypes.BOOL
+    info=FileBasicInfo()
+    if not query(msvcrt.get_osfhandle(descriptor),0,ctypes.byref(info),ctypes.sizeof(info)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if info.ChangeTime<=0:
+        raise OSError('无法读取成片的有效文件更改时间，未复用成片')
+    return info.ChangeTime
+
+
+def _final_file_token(final):
+    def stamp(stat):
+        return stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns
+    before=stamp(final.stat())
+    if os.name!='nt':return before
+    # Observe metadata only, without an extra content read or Path.open handle.
+    descriptor=os.open(final,os.O_RDONLY|os.O_BINARY)
+    try:
+        opened=stamp(os.fstat(descriptor))
+        changed=_windows_file_change_time(descriptor)
+        if (opened[:4]!=before[:4] or stamp(os.fstat(descriptor))!=opened
+                or stamp(final.stat())!=before):
+            raise ValueError('校验期间成片发生变化，未复用成片或修复记录')
+        return (*before,changed)
+    finally:
+        os.close(descriptor)
+
+
+def _stable_final_hash(final,stop):
+    """Use one full read only when the final's file generation stays unchanged."""
+    before=_final_file_token(final)
+    digest=cancellable_sha256(final,stop)
+    if _final_file_token(final)!=before:
+        raise ValueError('校验期间成片发生变化，未复用成片或修复记录')
+    return digest
+
+
+def _check_caption_staging(folder,source,captions):
+    # Replacing a leaf symlink or hardlink is safe; resolving its parent also
+    # catches a directory junction that makes the destination the input itself.
+    protected={source.resolve(),captions.resolve()}
+    parent=folder.resolve()
+    if any(parent/name in protected for name in ('captions.srt','captions.ass')):
+        raise ValueError('导出字幕暂存路径与输入文件冲突，未修改输入')
+
+
+def _stage_export_srt(captions,destination,expected_hash,stop):
+    """Replace a staging directory entry, never truncate its previous inode."""
+    temporary=None
+    try:
+        with tempfile.NamedTemporaryFile(dir=destination.parent,prefix='.captions.',
+                suffix='.srt',delete=False) as output:
+            temporary=Path(output.name)
+            with captions.open('rb') as source:
+                digest=copy_and_hash(source,output,stop)
+            output.flush()
+            os.fsync(output.fileno())
+        if digest!=expected_hash:
+            raise ValueError('复制字幕时内容发生变化，未压制')
+        _check_export_stop(stop)
+        replace_with_retry(temporary,destination)
+    finally:
+        if temporary is not None:cleanup_temporary(temporary)
+
+
 def _record_export(campaign,manifest,folder,final,output_key,output_hash,binding,draft,verification,*,stop=None,dependencies):
     _check_export_stop(stop)
     try:
@@ -468,7 +543,7 @@ def _export_video(campaign,stop,*,draft,encoder,dependencies):
     final=video_output_path(source,target,draft=draft)
     folder=campaign/'导出'/'草稿视频' if draft else campaign/'导出'
     published=final.exists()
-    output_hash=cancellable_sha256(final,stop) if published else None
+    output_hash=_stable_final_hash(final,stop) if published else None
     resume_encoder=_resume_encoder(folder,manifest,output_key,binding,encoder,published=published,
                                   output_hash=output_hash,source_info=info)
     # A completed encode needs verification and publication, not a working
@@ -502,14 +577,21 @@ def _export_video(campaign,stop,*,draft,encoder,dependencies):
             emit('已恢复成片记录，无需重复压制',status=status,output=str(final));return
         raise ValueError('目标'+edition+'已存在，且无法证明对应当前字幕；未覆盖，请另存旧版后重新导出')
     folder.mkdir(parents=True,exist_ok=True)
-    shutil.copyfile(captions,folder/'captions.srt')
-    if sha256(folder/'captions.srt')!=binding['captions_sha256']:
-        raise ValueError('复制字幕时内容发生变化，未压制')
-    r.run_process(['ffmpeg','-nostdin','-v','error','-y','-i',folder/'captions.srt',folder/'captions.ass'],
-                  folder/'ass.log',stop)
+    _check_caption_staging(folder,source,captions)
+    _stage_export_srt(captions,folder/'captions.srt',binding['captions_sha256'],stop)
+    converted=None
+    try:
+        # ffmpeg -y may truncate only this invocation's exclusively created ASS.
+        with tempfile.NamedTemporaryFile(dir=folder,prefix='.captions.',suffix='.ass',delete=False) as output:
+            converted=Path(output.name)
+        r.run_process(['ffmpeg','-nostdin','-v','error','-y','-i',folder/'captions.srt',converted],
+                      folder/'ass.log',stop)
+        _check_export_stop(stop)
+        ass=converted.read_text(encoding='utf-8-sig')
+    finally:
+        if converted is not None:cleanup_temporary(converted)
     video=next(s for s in info['streams'] if s['codec_type']=='video')
     progress.duration=float(info['format']['duration'])
-    ass=(folder/'captions.ass').read_text(encoding='utf-8-sig')
     import re
     ass=re.sub(r'(?m)^PlayResX:.*$',f'PlayResX: {video["width"]}',ass)
     ass=re.sub(r'(?m)^PlayResY:.*$',f'PlayResY: {video["height"]}',ass)

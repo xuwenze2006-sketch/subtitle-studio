@@ -424,10 +424,22 @@ class StudioController:
         return result
 
     def progress(self):
-        """Frequent progress updates only copy owned memory, never project files."""
-        with self.lock:
-            return {'project_id':self._project_id(),'source':self.source,'campaign':self.campaign,
-                    'job':deepcopy(self.job),'persistence_warning':self.persistence_warning}
+        """Return a small snapshot; resolve identity outside the live job lock."""
+        for attempt in range(2):
+            try:
+                return self._read_view(lambda view:view._progress_data(),finish=self._refresh_progress_job)
+            except ProjectSelectionChanged:
+                if attempt:raise
+
+    def _progress_data(self):
+        return {'project_id':self._project_id(),'source':self.source,'campaign':self.campaign,
+                'job':self.job,'persistence_warning':self.persistence_warning}
+
+    def _refresh_progress_job(self,view,result):
+        # Called under the live lock after path resolution and selection checks.
+        # Stop and worker updates may have advanced while the read was waiting.
+        result.update(job=deepcopy(self.job),persistence_warning=self.persistence_warning)
+        return result
 
     def state(self):
         # State polling has no project token. Retry one changed selection so a

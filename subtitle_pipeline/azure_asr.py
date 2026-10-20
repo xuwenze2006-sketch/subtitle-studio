@@ -24,6 +24,12 @@ from .api_key import is_transport_key
 from .subtitles import Cue
 
 
+# An application resource limit, with room for long, word-detailed results.
+# Short-utterance adapters use 4 MiB; Fast transcription may cover much more
+# audio, so keep 32 MiB rather than borrowing their smaller allowance.
+_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+
 @dataclass
 class AsrResult:
     cues: list[Cue]
@@ -220,6 +226,27 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _read_response(response) -> bytes:
+    """Bound actual bytes, including short reads and misleading length headers."""
+    body = bytearray()
+    while True:
+        chunk = response.read(min(65536, _MAX_RESPONSE_BYTES + 1 - len(body)))
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > _MAX_RESPONSE_BYTES:
+            raise ValueError("Azure response exceeds the safe size limit")
+    # Unlike read(), HTTPResponse.read(n) may return a truncated body without
+    # raising IncompleteRead. Do not settle a syntactically valid JSON prefix.
+    declared = response.headers.get("Content-Length")
+    if declared is not None:
+        if not re.fullmatch(r"[0-9]+", declared.strip()):
+            raise ValueError("Azure response Content-Length is invalid")
+        if int(declared) != len(body):
+            raise ValueError("Azure response body does not match Content-Length")
+    return bytes(body)
+
+
 def _endpoint_url(endpoint: str, api_version: str) -> str:
     if not isinstance(endpoint, str) or endpoint != endpoint.strip() or re.search(r"[\x00-\x20\x7f]", endpoint):
         raise ValueError("Azure endpoint must be an HTTPS resource root")
@@ -321,11 +348,11 @@ def transcribe(audio_path: Path, *, endpoint: str, key: str,
         opener = urllib.request.build_opener(_NoRedirect())
         try:
             with opener.open(request, timeout=300) as result:
-                return HttpResponse(result.status, dict(result.headers.items()), result.read())
+                return HttpResponse(result.status, dict(result.headers.items()), _read_response(result))
         except urllib.error.HTTPError as error:
             # HTTP status codes belong to the ledger's retry/accounting policy.
             with error:
-                return HttpResponse(error.code, dict(error.headers.items()), error.read())
+                return HttpResponse(error.code, dict(error.headers.items()), _read_response(error))
 
     payload = ledger.execute(request_id=request_id, provider="azure_fast", reserved_cny=reserved_cny,
                              raw_path=canonical_raw, send=send, stop_event=stop_event)

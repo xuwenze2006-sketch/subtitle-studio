@@ -228,9 +228,20 @@ class DraftVideoTests(unittest.TestCase):
                    for call in self.encoder.call_args_list)
 
     def fail_during_copy(self):
-        with patch.object(workflow.shutil, 'copyfileobj', side_effect=OSError('disk full')):
+        original_copy=workflow.shutil.copyfileobj
+        partial=self.campaign/'导出'/'草稿视频'/'result.partial.mp4'
+        failed=[]
+        def publication_failure(source,destination,*args):
+            if Path(getattr(source,'source',source).name)==partial:
+                failed.append(partial)
+                raise OSError('disk full')
+            return original_copy(source,destination,*args)
+        with patch.object(workflow.shutil, 'copyfileobj', side_effect=publication_failure):
             with self.assertRaises(OSError):
                 workflow.export_video(self.campaign, self.stop, draft=True)
+        self.assertEqual(failed,[partial])
+        self.assertEqual(workflow.read_json(partial.parent/'encoding-checkpoint.json')['status'],'encoded')
+        self.assertTrue((partial.parent/'publication-checkpoint.json').is_file())
 
     def test_missing_mkv_frame_count_is_not_a_parameter_mismatch(self):
         source_info = {'streams': [{'codec_type': 'video', 'width': 640, 'height': 360,
@@ -822,13 +833,21 @@ class DraftVideoTests(unittest.TestCase):
         self.assertEqual(self.decode_check_count(), 3)
 
     def test_cancel_during_destination_copy_retains_encode_and_leaves_no_final(self):
+        original_copy=workflow.shutil.copyfileobj
+        partial=self.campaign/'导出'/'草稿视频'/'result.partial.mp4'
+        interrupted=[]
         def interrupt_copy(source, destination, *a):
+            if Path(getattr(source,'source',source).name)!=partial:
+                return original_copy(source,destination,*a)
+            interrupted.append(partial)
             destination.write(source.read(4))
             self.stop.set()
             destination.write(source.read(4))
         with patch.object(workflow.shutil, 'copyfileobj', side_effect=interrupt_copy):
             with self.assertRaises(workflow.r.Cancelled):
                 workflow.export_video(self.campaign, self.stop, draft=True)
+        self.assertEqual(interrupted,[partial])
+        self.assertEqual(workflow.read_json(partial.parent/'encoding-checkpoint.json')['status'],'encoded')
         self.assertFalse(video_output_path(self.source, 'zh-CN', draft=True).exists())
         self.assertFalse(any(path.suffix == '.tmp' for path in self.root.iterdir()))
         self.stop.clear()
