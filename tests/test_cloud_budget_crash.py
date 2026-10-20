@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
 import venv
@@ -201,6 +202,34 @@ def _spawn_fixture_python(program, *arguments, **options):
     return subprocess.Popen([executable, '-c', program, *map(str, arguments)], **options)
 
 
+def _wait_for_fixture_ready(root, owner, stage):
+    deadline = time.monotonic() + 8
+    last_denial = None
+    while True:
+        if _wait_native(owner, 0):
+            raise AssertionError('Fixture exited before readiness: ' + (root / 'owner.log').read_text(encoding='utf-8'))
+        if time.monotonic() >= deadline:
+            if last_denial is not None:
+                raise last_denial
+            raise TimeoutError(f'No readiness at {stage}')
+        try:
+            ready = json.loads((root / 'ready.json').read_bytes())
+        except FileNotFoundError:
+            last_denial = None
+        except PermissionError as error:
+            if os.name != 'nt':
+                raise
+            # CRT reads may expose a Windows sharing denial as errno 13 with
+            # no winerror. Only this owned readiness signal gets the original
+            # bounded wait; no ledger, response or send is retried here.
+            last_denial = error
+        else:
+            if ready != {'pid': owner.pid, 'stage': stage} or _wait_native(owner, 0):
+                raise AssertionError('Ready file did not identify the live, owned process')
+            return ready
+        time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+
+
 def run_crash_case(root, stage):
     """Use only the supplied, newly created fixture directory and held handles."""
     if stage not in STAGES or any(root.iterdir()):
@@ -223,16 +252,7 @@ def run_crash_case(root, stage):
         return json.loads((root / (name + '-result.json')).read_bytes())
     try:
         owner = spawn('crash', 'owner')
-        deadline = time.monotonic() + 8
-        while not (root / 'ready.json').exists():
-            if _wait_native(owner, 0):
-                raise AssertionError('Fixture exited before readiness: ' + (root / 'owner.log').read_text(encoding='utf-8'))
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f'No readiness at {stage}')
-            time.sleep(0.01)
-        ready = json.loads((root / 'ready.json').read_bytes())
-        if ready != {'pid': owner.pid, 'stage': stage} or _wait_native(owner, 0):
-            raise AssertionError('Ready file did not identify the live, owned process')
+        ready = _wait_for_fixture_ready(root, owner, stage)
         before = _snapshot(root)
         # execute() still owns the request lock at all earlier stages. The
         # success pause deliberately occurs outside execute(), after release.
@@ -253,6 +273,139 @@ def run_crash_case(root, stage):
         # No PID lookup or taskkill: these handles refer only to our own Popen
         # children even if Windows later reuses their numeric PIDs.
         _cleanup_fixture_processes(children, streams)
+
+
+class CloudBudgetCrashReadinessTests(unittest.TestCase):
+    def read_ready(self, reads, *, native=None, sleep=None, monotonic=None):
+        owner = Mock(pid=73)
+        with patch.object(Path, 'read_bytes', side_effect=reads), \
+                patch(__name__ + '._wait_native', side_effect=native or (lambda *_args: False)), \
+                patch(__name__ + '.time.sleep', side_effect=sleep), \
+                patch(__name__ + '.time.monotonic', side_effect=monotonic or time.monotonic):
+            return _wait_for_fixture_ready(Path('fixture-root'), owner, 'sent')
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows readiness sharing denials')
+    def test_windows_read_denials_can_recover_within_readiness_deadline(self):
+        for code in (None, 5, 32, 33):
+            with self.subTest(winerror=code):
+                error = PermissionError(13, 'owned fixture readiness temporarily locked')
+                if code is not None:
+                    error.winerror = code
+                ready = self.read_ready([error, b'{"pid": 73, "stage": "sent"}'])
+                self.assertEqual(ready, {'pid': 73, 'stage': 'sent'})
+
+    def test_missing_ready_file_can_be_published_before_the_deadline(self):
+        ready = self.read_ready([FileNotFoundError('not published'), b'{"pid": 73, "stage": "sent"}'])
+        self.assertEqual(ready, {'pid': 73, 'stage': 'sent'})
+
+    def test_other_read_errors_fail_immediately_with_original_identity(self):
+        for code in (87, 1117):
+            with self.subTest(winerror=code):
+                error = OSError(22, 'not a Windows permission denial')
+                error.winerror = code
+                slept = []
+                with self.assertRaises(OSError) as raised:
+                    self.read_ready([error], sleep=slept.append)
+                self.assertIs(raised.exception, error)
+                self.assertEqual(slept, [])
+
+    def test_non_windows_permission_denial_fails_immediately(self):
+        error, slept = PermissionError(13, 'permission denied'), []
+        with patch(__name__ + '.os', SimpleNamespace(name='posix')):
+            with self.assertRaises(PermissionError) as raised:
+                self.read_ready([error], sleep=slept.append)
+        self.assertIs(raised.exception, error)
+        self.assertEqual(slept, [])
+
+    def test_malformed_ready_json_fails_without_retry(self):
+        slept = []
+        with self.assertRaises(json.JSONDecodeError):
+            self.read_ready([b'{'], sleep=slept.append)
+        self.assertEqual(slept, [])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows readiness sharing denials')
+    def test_persistent_read_denial_expires_at_original_deadline_with_original_error(self):
+        for code in (None, 32, 87):
+            with self.subTest(winerror=code):
+                error = PermissionError(13, 'owned fixture remained locked')
+                if code is not None:
+                    error.winerror = code
+                now, sleeps = [0.0], []
+                def sleep(seconds):
+                    sleeps.append(seconds)
+                    now[0] = 8.0
+                with self.assertRaises(PermissionError) as raised:
+                    self.read_ready(error, sleep=sleep, monotonic=lambda: now[0])
+                self.assertIs(raised.exception, error)
+                self.assertEqual(sleeps, [0.01])
+
+    def test_unpublished_ready_file_expires_at_original_deadline(self):
+        now = [0.0]
+        def sleep(_seconds):
+            now[0] = 8.0
+        with self.assertRaisesRegex(TimeoutError, 'No readiness at sent'):
+            self.read_ready(FileNotFoundError('not published'),
+                            sleep=sleep, monotonic=lambda: now[0])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows readiness sharing denials')
+    def test_denied_read_does_not_hide_owned_process_exit(self):
+        error = PermissionError(13, 'temporarily locked')
+        error.winerror = 32
+        with patch.object(Path, 'read_text', return_value='owned fixture stopped'):
+            with self.assertRaisesRegex(AssertionError, 'Fixture exited before readiness: owned fixture stopped'):
+                self.read_ready([error], native=iter((False, True)))
+
+    def test_readable_ready_file_must_identify_the_live_owned_process(self):
+        for payload in (b'{"pid": 74, "stage": "sent"}', b'{"pid": 73, "stage": "received"}'):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(AssertionError, 'Ready file did not identify the live, owned process'):
+                    self.read_ready([payload])
+        with self.assertRaisesRegex(AssertionError, 'Ready file did not identify the live, owned process'):
+            self.read_ready([b'{"pid": 73, "stage": "sent"}'], native=iter((False, True)))
+
+    @unittest.skipUnless(os.name == 'nt', 'An owned Windows file sharing lock')
+    def test_owned_windows_sharing_lock_can_clear_while_the_owned_worker_remains_live(self):
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        with tempfile.TemporaryDirectory(prefix='budget-ready-sharing-') as temporary:
+            root = Path(temporary)
+            owner = _spawn_fixture_python('import time; time.sleep(30)', cwd=ROOT,
+                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+            handle, observed = None, []
+            try:
+                ready = root / 'ready.json'
+                ready.write_text(json.dumps({'pid': owner.pid, 'stage': 'sent'}), encoding='utf-8')
+                handle = kernel.CreateFileW(str(ready), 0x80000000, 0, None, 3, 0, None)
+                if handle == wintypes.HANDLE(-1).value:
+                    handle = None
+                    raise ctypes.WinError(ctypes.get_last_error())
+                original_read = Path.read_bytes
+                def read_then_unlock(path):
+                    nonlocal handle
+                    try:
+                        return original_read(path)
+                    except PermissionError as error:
+                        observed.append((error.errno, getattr(error, 'winerror', None)))
+                        if not kernel.CloseHandle(handle):
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        handle = None
+                        raise
+                with patch.object(Path, 'read_bytes', new=read_then_unlock):
+                    evidence = _wait_for_fixture_ready(root, owner, 'sent')
+                self.assertEqual(len(observed), 1)
+                self.assertEqual(observed[0][0], 13)
+                self.assertIn(observed[0][1], (None, 32))
+                self.assertEqual(evidence, {'pid': owner.pid, 'stage': 'sent'})
+                self.assertFalse(_wait_native(owner, 0))
+            finally:
+                if handle is not None:
+                    kernel.CloseHandle(handle)
+                _cleanup_fixture_processes([owner], [])
 
 
 class CloudBudgetCrashCleanupTests(unittest.TestCase):

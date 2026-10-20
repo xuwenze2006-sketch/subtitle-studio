@@ -14,6 +14,12 @@ from unittest.mock import patch
 from subtitle_pipeline import studio
 
 
+# Controls must finish before the unreleased preflight gate's 5 s fallback.
+# This detects retained live locks; 300 ms is not a product latency contract
+# for calls that also perform account/path I/O and post-admission persistence.
+CONTROL_DEADLOCK_TIMEOUT = 2
+
+
 class StudioStartAdmissionTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='studio-start-admission-')
@@ -80,6 +86,12 @@ class StudioStartAdmissionTests(unittest.TestCase):
         return (deepcopy(self.app.job),self.app.stop_event,self.app._cancel_marker,
                 list(self.app._redactions),deepcopy(self.app._last_runs),self.app._persist_revision)
 
+    def assert_controls_complete(self, futures, pending, release, message):
+        done,_=wait(futures,timeout=CONTROL_DEADLOCK_TIMEOUT)
+        self.assertFalse(release.is_set(),'preflight was released before the control check')
+        self.assertFalse(pending.done(),'preflight escaped its held gate before the control check')
+        self.assertEqual(len(done),len(futures),message)
+
     def test_each_slow_startup_state_read_leaves_controls_responsive_before_admission(self):
         # The three reads cover cloud eligibility, state materialization, and local config.
         for number in (1,2,3):
@@ -95,8 +107,8 @@ class StudioStartAdmissionTests(unittest.TestCase):
                         progress=controls.submit(self.app.progress)
                         touch=controls.submit(self.app.touch,SimpleNamespace(last_touch=0.0))
                         stop=controls.submit(self.app.stop)
-                        done,_=wait((progress,touch,stop),timeout=.3)
-                        self.assertEqual(len(done),3,'startup read retained the live controller lock')
+                        self.assert_controls_complete((progress,touch,stop),pending,release,
+                            'startup read retained the live controller lock')
                         self.assertEqual(stop.result(),{'stopped':False})
                         self.assertTrue(touch.result())
                         self.assertFalse(progress.result()['job']['busy'])
@@ -114,9 +126,10 @@ class StudioStartAdmissionTests(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(2))
                 winner=controls.submit(self.app.start,{'action':'local'})
-                done,_=wait((winner,),timeout=.3)
-                self.assertEqual(len(done),1,'competing admission waited for detached preflight')
+                self.assert_controls_complete((winner,),pending,release,
+                    'competing admission waited for detached preflight')
                 self.assertTrue(winner.result()['started'])
+                self.assertTrue(self.worker_started.wait(CONTROL_DEADLOCK_TIMEOUT))
             finally: release.set()
             try:
                 with self.assertRaisesRegex(ValueError,'已有任务'): pending.result(timeout=3)
@@ -143,8 +156,8 @@ class StudioStartAdmissionTests(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(2))
                 touched=controls.submit(self.app.touch,SimpleNamespace(last_touch=0.0))
-                done,_=wait((touched,),timeout=.3)
-                self.assertEqual(len(done),1,'project identity resolution held the live lock')
+                self.assert_controls_complete((touched,),pending,release,
+                    'project identity resolution held the live lock')
                 self.assertTrue(touched.result())
             finally: release.set()
             self.assertTrue(pending.result(timeout=3)['started'])
@@ -177,8 +190,9 @@ class StudioStartAdmissionTests(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(2))
                 winner=controls.submit(self.app.start,{'action':'local'})
-                done,_=wait((winner,),timeout=.3)
-                self.assertEqual(len(done),1,'competing admission waited for detached preflight')
+                self.assert_controls_complete((winner,),pending,release,
+                    'competing admission waited for detached preflight')
+                self.assertTrue(self.worker_started.wait(CONTROL_DEADLOCK_TIMEOUT))
                 self.assertTrue(winner.result()['started']); self.finish_worker()
                 self.assertFalse(self.app.job['busy'])
             finally: release.set()
@@ -198,8 +212,8 @@ class StudioStartAdmissionTests(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(2))
                 switched=controls.submit(switch)
-                done,_=wait((switched,),timeout=.3)
-                self.assertEqual(len(done),1,'selection waited for detached preflight')
+                self.assert_controls_complete((switched,),pending,release,
+                    'selection waited for detached preflight')
                 switched.result(); self.assertEqual(self.app._project_id(),original)
             finally: release.set()
             with self.assertRaises(studio.ProjectSelectionChanged): pending.result(timeout=3)
@@ -213,8 +227,8 @@ class StudioStartAdmissionTests(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(2))
                 shutdown=controls.submit(self.app.claim_idle_shutdown,SimpleNamespace(last_touch=0.0))
-                done,_=wait((shutdown,),timeout=.3)
-                self.assertEqual(len(done),1,'shutdown waited for unadmitted preflight')
+                self.assert_controls_complete((shutdown,),pending,release,
+                    'shutdown waited for unadmitted preflight')
                 self.assertTrue(shutdown.result())
             finally: release.set()
             with self.assertRaisesRegex(RuntimeError,'重新打开'): pending.result(timeout=3)
@@ -233,8 +247,8 @@ class StudioStartAdmissionTests(unittest.TestCase):
                 try:
                     self.assertTrue(entered.wait(2))
                     changed=controls.submit(change)
-                    done,_=wait((changed,),timeout=.3)
-                    self.assertEqual(len(done),1,'configuration write waited for detached preflight')
+                    self.assert_controls_complete((changed,),pending,release,
+                        'configuration write waited for detached preflight')
                     self.assertTrue(changed.result()['saved'])
                 finally: release.set()
                 with self.assertRaisesRegex(RuntimeError,'配置.*变化'): pending.result(timeout=3)

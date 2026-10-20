@@ -215,47 +215,67 @@ class PreparationCancellationTests(unittest.TestCase):
         self.assertEqual((self.campaign/'campaign.json').read_bytes(), before)
 
     def test_stopping_real_duration_probe_reaps_child_before_other_preparation(self):
+        from subtitle_pipeline.windows_job import wait_for_process_exit
         original = subprocess.Popen
         children = []
+        launched = threading.Event()
         ready = threading.Event()
         done = threading.Event()
+        stop_requested_at = []
+        alive_at_stop = []
         marker = self.root/'probe-ready'
-        script = ('from pathlib import Path; import sys,time; '
-                  'Path(sys.argv[1]).write_text("ready"); '
-                  'time.sleep(2); print(\'{"format":{"duration":"2"}}\')')
+        release = self.root/'probe-release'
+        script = ('from pathlib import Path\nimport sys,time\n'
+                  'Path(sys.argv[1]).write_text("ready")\n'
+                  'release = Path(sys.argv[2])\n'
+                  'deadline = time.monotonic()+10\n'
+                  'while not release.exists() and time.monotonic()<deadline:\n'
+                  '    time.sleep(.01)\n'
+                  'print(\'{"format":{"duration":"2"}}\')\n')
         def launch(args, *rest, **kwargs):
             self.assertEqual(args[0], 'ffprobe')
-            child = original([sys.executable, '-c', script, str(marker)], *rest, **kwargs)
+            child = original([sys.executable, '-c', script, str(marker), str(release)], *rest, **kwargs)
             children.append(child)
-            ready.set()
+            launched.set()
             return child
         def cancel():
-            if not ready.wait(3):
+            if not launched.wait(3):
                 return
             deadline = time.monotonic()+3
             while not marker.exists() and time.monotonic()<deadline and not done.wait(.01):
                 pass
             if marker.exists():
+                ready.set()
+                alive_at_stop.append(children[0].poll() is None)
+                stop_requested_at.append(time.monotonic())
                 self.stop.set()
         worker = threading.Thread(target=cancel, daemon=True)
         worker.start()
         try:
             with patch.object(subprocess, 'Popen', side_effect=launch), \
-                    patch.object(w, 'media_info', return_value={'streams':[{'codec_type':'audio'}]}) as info:
-                started = time.monotonic()
+                    patch.object(w, 'media_info', return_value={'streams':[{'codec_type':'audio'}]}) as info, \
+                    patch.object(w, 'write_manifest', wraps=w.write_manifest) as write_manifest:
                 with self.assertRaises(r.Cancelled):
                     w.prepare(self.source, self.campaign, None, self.stop)
-                elapsed = time.monotonic()-started
+                returned_at = time.monotonic()
+                reaped_at_return = len(children)==1 and wait_for_process_exit(children[0], milliseconds=0)
+                self.assertTrue(ready.is_set(), 'probe never signaled readiness')
+                self.assertTrue(self.stop.is_set(), 'probe returned without a stop request')
+                self.assertEqual(alive_at_stop, [True], 'probe had already exited before stop')
+                self.assertEqual(len(stop_requested_at), 1)
+                # Startup and readiness latency precede the cancellation request.
+                elapsed = returned_at-stop_requested_at[0]
                 self.assertFalse((self.campaign/'campaign.json').exists(), 'cancelled probe wrote a manifest')
+                write_manifest.assert_not_called()
                 info.assert_not_called()
                 self.assertLess(elapsed, 1.5, 'probe ignored stop until synthetic process finished')
                 self.assertEqual(len(children), 1)
-                from subtitle_pipeline.windows_job import wait_for_process_exit
-                self.assertTrue(wait_for_process_exit(children[0], milliseconds=1000),
+                self.assertTrue(reaped_at_return,
                                 'probe returned before native process exit')
         finally:
             done.set()
             worker.join(timeout=4)
+            release.touch()
             for child in children:
                 if child.poll() is None:
                     child.kill()

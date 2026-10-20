@@ -289,8 +289,12 @@ def recognize_chunk(config, chunk, folder, stop, *, before_submit=None):
     exe, model = engine_paths()
     environment = os.environ.copy()
     environment.update(OPENBLAS_NUM_THREADS=str(config.threads), OMP_NUM_THREADS=str(config.threads))
-    run_process([exe,'-m',model,'-f',audio,'-l',config.language,'-t',str(config.threads),'-ng','-osrt','-of',folder/'asr','--print-progress'], folder/'asr.log', stop, environment)
-    return parse_srt((folder/'asr.srt').read_text(encoding='utf-8-sig'))
+    # A successful exit must not adopt raw SRT left by an earlier failed run.
+    # Keep historical files untouched and consume only this attempt's output.
+    with tempfile.TemporaryDirectory(prefix='.asr-',dir=folder) as temporary:
+        output=Path(temporary)/'asr'
+        run_process([exe,'-m',model,'-f',audio,'-l',config.language,'-t',str(config.threads),'-ng','-osrt','-of',output,'--print-progress'], folder/'asr.log', stop, environment)
+        return parse_srt(output.with_suffix('.srt').read_text(encoding='utf-8-sig'))
 
 
 def _check_identity_stop(stop, cause=None):
