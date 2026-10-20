@@ -35,6 +35,8 @@ class StudioOpenConcurrencyTests(unittest.TestCase):
                     'draft_output_binding': {'source_sha256': 'a' * 64, 'render_version': 1,
                         'review_status': 'unreviewed_draft', 'manual_revision': None,
                         'machine_source_sha256': subtitle_digest, 'machine_target_sha256': subtitle_digest}}
+        from tests.studio_export_fixtures import approve_export_fixture
+        approve_export_fixture(self.project, manifest)
         (self.project / 'campaign.json').write_text(json.dumps(manifest), encoding='utf-8')
         self.app = studio.StudioController(source=str(self.source), campaign=str(self.project),
                                            state_path=self.root / 'absent-state.json')

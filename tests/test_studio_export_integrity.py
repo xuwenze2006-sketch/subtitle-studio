@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from tests import test_studio
+from tests.studio_export_fixtures import approve_export_fixture
 
 
 class StudioExportIntegrityTests(unittest.TestCase):
@@ -20,9 +21,8 @@ class StudioExportIntegrityTests(unittest.TestCase):
         manifest.update(status='exported', output=str(self.output),
                         output_sha256=hashlib.sha256(self.output.read_bytes()).hexdigest(),
                         output_binding={'source_sha256': manifest['source']['sha256'],
-                                        'captions_sha256': 'c'*64,
-                                        'review_artifacts_sha256': 'd'*64,
                                         'render_version': 1})
+        approve_export_fixture(self.campaign, manifest)
         self.write_manifest(manifest)
         return manifest
 

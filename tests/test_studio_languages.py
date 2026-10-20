@@ -63,6 +63,8 @@ class StudioLanguageTests(unittest.TestCase):
         manifest.update(language='zh', target='en', status='exported', output=str(output),
                         output_sha256=sha256(output),
                         output_binding={'render_version': 1, 'source_sha256': manifest['source']['sha256']})
+        from tests.studio_export_fixtures import approve_export_fixture
+        approve_export_fixture(self.campaign, manifest)
         path = self.campaign / 'campaign.json'
         path.write_text(json.dumps(manifest), encoding='utf-8')
         self.assertIsNone(self.app.exported_video_path())

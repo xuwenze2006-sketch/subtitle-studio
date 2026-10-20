@@ -52,9 +52,12 @@ export function createReviewDraftStorage({ storage, now = Date.now, retentionMs,
     const latest = new Map();
     for (const entry of entries) {
       const key = JSON.stringify([entry.projectKey, entry.sample]);
-      if (!latest.has(key) || latest.get(key).savedAt <= entry.savedAt) latest.set(key, entry);
+      latest.delete(key);
+      latest.set(key, entry);
     }
-    const kept = [...latest.values()].sort((a, b) => a.savedAt - b.savedAt).slice(-countLimit);
+    // Writes append their replacement record. Preserve that actual write order:
+    // wall-clock timestamps can move backwards and cannot rank draft recency.
+    const kept = [...latest.values()].slice(-countLimit);
     while (kept.length && encode(kept).length * 2 > byteLimit) kept.shift();
     return kept;
   };
@@ -69,7 +72,7 @@ export function createReviewDraftStorage({ storage, now = Date.now, retentionMs,
     if (!Array.isArray(value.entries)) return { entries: [], raw, error: "invalid-data" };
     const entries = value.entries.map(entry => object(entry)
       ? reviewRecord(entry.projectKey, { ...entry, initial: entry.original }, entry.savedAt) : null)
-      .filter(entry => entry && entry.savedAt <= time && time - entry.savedAt < retention);
+      .filter(entry => entry && Math.max(0, time - entry.savedAt) < retention);
     return { entries: bounded(entries), raw, error: null };
   };
   const persist = (target, entries) => {

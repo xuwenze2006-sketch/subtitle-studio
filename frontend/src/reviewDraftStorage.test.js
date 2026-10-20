@@ -44,6 +44,72 @@ describe("local review draft recovery", () => {
     expect(store.read("missing", "main")).toEqual({ ok: true, error: null, draft: null, savedAt: null });
   });
 
+  it("recovers unsent fields after the wall clock moves backwards without deleting the stored draft", () => {
+    let time = 2000;
+    const first = createReviewDraftStorage({ storage: localStorage, now: () => time });
+    expect(first.write(project, draft()).ok).toBe(true);
+    const raw = localStorage.getItem(REVIEW_DRAFT_STORAGE_KEY);
+    time = 1000;
+    const fresh = createReviewDraftStorage({ storage: localStorage, now: () => time });
+    expect(fresh.read(project, "main")).toEqual({
+      ok: true, error: null, savedAt: 2000,
+      draft: { cueId: 1, sample: "main", revision: "r1", initial: original,
+        fields: { ...original, target_text: "您好" } },
+    });
+    expect(localStorage.getItem(REVIEW_DRAFT_STORAGE_KEY)).toBe(raw);
+  });
+
+  it.each([{ maxEntries: 2 }, { maxBytes: 2600 }])(
+    "keeps the newest write recoverable within the capacity limit after clock rollback: %j", limits => {
+      let time = 1000;
+      const first = createReviewDraftStorage({ storage: localStorage, now: () => time, ...limits });
+      expect(first.write(project, draft()).ok).toBe(true);
+      time = 2000;
+      expect(first.write(project, draft({ sample: "sample-1" })).ok).toBe(true);
+      time = 500;
+      const fresh = createReviewDraftStorage({ storage: localStorage, now: () => time, ...limits });
+      expect(fresh.write(project, draft({ sample: "sample-2", fields: { ...original, note: "回拨后新输入" } })).ok).toBe(true);
+      expect(fresh.read(project, "sample-2").draft?.fields.note).toBe("回拨后新输入");
+      expect(fresh.read(project, "sample-1").draft?.fields.target_text).toBe("您好");
+      expect(fresh.read(project, "main").draft).toBeNull();
+      expect(JSON.parse(localStorage.getItem(REVIEW_DRAFT_STORAGE_KEY)).entries).toHaveLength(2);
+    },
+  );
+
+  it.each([{ maxEntries: 2 }, { maxBytes: 2600 }])(
+    "retains the last two actual writes across reopening while the clock catches up: %j", limits => {
+      let time = 1000;
+      const reopen = () => createReviewDraftStorage({ storage: localStorage, now: () => time, ...limits });
+      const first = reopen();
+      expect(first.write(project, draft()).ok).toBe(true);
+      time = 2000;
+      expect(first.write(project, draft({ sample: "sample-1" })).ok).toBe(true);
+      time = 500;
+      expect(reopen().write(project, draft({ sample: "sample-2" })).ok).toBe(true);
+      time = 600;
+      const fresh = reopen();
+      expect(fresh.read(project, "sample-2").draft?.fields.target_text).toBe("您好");
+      expect(fresh.write(project, draft({ sample: "sample-3" })).ok).toBe(true);
+      expect(reopen().read(project, "sample-2").draft?.fields.target_text).toBe("您好");
+      expect(reopen().read(project, "sample-3").draft?.fields.target_text).toBe("您好");
+      expect(reopen().read(project, "sample-1").draft).toBeNull();
+      expect(JSON.parse(localStorage.getItem(REVIEW_DRAFT_STORAGE_KEY)).entries).toHaveLength(2);
+    },
+  );
+
+  it("can continue editing and explicitly clear a recovered draft while the clock catches up", () => {
+    let time = 2000;
+    const first = createReviewDraftStorage({ storage: localStorage, now: () => time });
+    expect(first.write(project, draft()).ok).toBe(true);
+    time = 1000;
+    const fresh = createReviewDraftStorage({ storage: localStorage, now: () => time });
+    expect(fresh.read(project, "main").draft?.revision).toBe("r1");
+    expect(fresh.write(project, draft({ fields: { ...original, target_text: "继续校对" } })).ok).toBe(true);
+    expect(fresh.read(project, "main").draft?.fields.target_text).toBe("继续校对");
+    expect(fresh.clear(project, "main")).toEqual({ ok: true, error: null });
+    expect(localStorage.getItem(REVIEW_DRAFT_STORAGE_KEY)).toBeNull();
+  });
+
   it("clears only an explicitly saved or discarded segment and removes the empty container", () => {
     const store = createReviewDraftStorage({ storage: localStorage, now: () => 1000 });
     store.write(project, draft());

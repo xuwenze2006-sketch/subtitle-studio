@@ -1113,6 +1113,58 @@ class StudioController:
         except (ValueError,OSError,RuntimeError):return None
         return output if self._video_matches(output,manifest['draft_output_sha256']) else None
 
+    def _approved_video_subtitles_match(self,manifest,binding):
+        """Check small saved subtitle evidence, without probing or writing media."""
+        from .integrity import fingerprint
+        try:
+            project=self._project_path()
+            full=self._contained_path(project,'整片')
+            review=read_json(self._contained_path(project,'final-review.json'))
+            language,target=manifest_languages(manifest)
+            source=manifest.get('source')
+            if (not isinstance(source,dict) or not isinstance(source.get('path'),str)
+                    or not isinstance(source.get('sha256'),str)
+                    or not re.fullmatch(r'[0-9a-f]{64}',source['sha256'])
+                    or review.get('status')!='sampled_approved'
+                    or review.get('source_sha256')!=source.get('sha256')
+                    or manifest_languages(review)!=(language,target)):
+                return False
+            revision=review.get('manual_revision')
+            if revision is not None:
+                if not isinstance(revision,str) or not re.fullmatch(r'[0-9a-f]{64}',revision):return False
+                folder=self._contained_path(full,Path('人工校对')/'版本'/revision)
+                names=(*output_names(target),'校对记录.json')
+            else:
+                if self._contained_path(full,Path('人工校对')/'校对记录.json').exists():return False
+                folder=full
+                names=(*output_names(target),'需复核.json')
+            artifacts=review.get('artifacts')
+            if not isinstance(artifacts,list) or len(artifacts)!=len(names):return False
+            expected={self._contained_path(folder,name) for name in names}
+            approved={}
+            # Validate the whole fixed-size list before reading any artifact.
+            # Compare untrusted paths lexically against known contained paths;
+            # resolving arbitrary receipt paths could touch unrelated drives.
+            for item in artifacts:
+                if (not isinstance(item,dict) or not isinstance(item.get('path'),str)
+                        or not isinstance(item.get('sha256'),str)
+                        or not re.fullmatch(r'[0-9a-f]{64}',item['sha256'])):return False
+                path=Path(item['path'])
+                if path not in expected or path in approved:return False
+                approved[path]=item['sha256']
+            if fingerprint(artifacts)!=binding.get('review_artifacts_sha256'):return False
+            captions=self._contained_path(folder,output_names(target)[1])
+            if approved[captions]!=binding.get('captions_sha256'):return False
+            if revision is not None:
+                from .manual_review import load_review
+                current=load_review(full,language=language,target=target)
+                if (not current['exists'] or current['revision']!=revision
+                        or current['binding']!=review.get('manual_binding')):return False
+            return all(hashlib.sha256(path.read_bytes()).hexdigest()==digest
+                       for path,digest in approved.items())
+        except (OSError,ValueError,TypeError,KeyError,RuntimeError):
+            return False
+
     def _exported_video_path(self):
         """Accept only the official export record at its deterministic target."""
         if not self.campaign or not self.source:return None
@@ -1123,7 +1175,7 @@ class StudioController:
             or not isinstance(binding,dict) or binding.get('render_version')!=1
             or not re.fullmatch(r'[0-9a-f]{64}',str(manifest.get('output_sha256','')))):
             return None
-        if self._manual_status(manifest).get('invalidates_approval'):return None
+        if not self._approved_video_subtitles_match(manifest,binding):return None
         source=Path(self.source).resolve()
         if Path(manifest.get('source',{}).get('path','')).resolve()!=source:return None
         if binding.get('source_sha256')!=manifest.get('source',{}).get('sha256'):return None

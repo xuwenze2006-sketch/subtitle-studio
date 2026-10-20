@@ -366,7 +366,9 @@ class StudioTests(unittest.TestCase):
         self.assertIsNone(self.app.preview().get('exported_video'))
         manifest['source']['sha256']=sha256(self.source)
         manifest.update(status='exported',output=str(output),output_sha256=sha256(output),
-                        output_binding={'source_sha256':manifest['source']['sha256'],'captions_sha256':'c'*64,'review_artifacts_sha256':'d'*64,'render_version':1})
+                        output_binding={'source_sha256':manifest['source']['sha256'],'render_version':1})
+        from tests.studio_export_fixtures import approve_export_fixture
+        approve_export_fixture(self.campaign,manifest)
         (self.campaign/'campaign.json').write_text(json.dumps(manifest),encoding='utf-8')
         result=self.app.preview()
         self.assertEqual(result['exported_video']['name'],output.name)
