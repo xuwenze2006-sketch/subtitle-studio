@@ -356,10 +356,11 @@ def _final_file_token(final):
 
 def _stable_final_hash(final,stop):
     """Use one full read only when the final's file generation stays unchanged."""
-    before=_final_file_token(final)
-    digest=cancellable_sha256(final,stop)
-    if _final_file_token(final)!=before:
-        raise ValueError('校验期间成片发生变化，未复用成片或修复记录')
+    with file_observation.stable_read_guard(final):
+        before=_final_file_token(final)
+        digest=cancellable_sha256(final,stop)
+        if _final_file_token(final)!=before:
+            raise ValueError('校验期间成片发生变化，未复用成片或修复记录')
     return digest
 
 

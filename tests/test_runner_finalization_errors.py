@@ -28,12 +28,13 @@ class RunnerFinalizationErrorsTests(unittest.TestCase):
     @contextmanager
     def failed_output(self,error,*,destination=None,diagnostic_error=None):
         target=destination or self.config.project/'原文.srt'
-        original_text=r.atomic_text;original_json=r.atomic_json
+        original_publish=r.output_publication.publish_record;original_json=r.atomic_json
         journals=[];diagnostics=[];writes=[]
-        def text(path,value):
-            if Path(path)==target:
-                writes.append(Path(path));raise error
-            return original_text(path,value)
+        def publication(project,record,*args,**kwargs):
+            path=Path(project)/record['relative']
+            if path==target:
+                writes.append(path);raise error
+            return original_publish(project,record,*args,**kwargs)
         def saved(path,value):
             if Path(path)==self.config.project/'state.json':
                 if value.get('pending_outputs'):journals.append(copy.deepcopy(value['pending_outputs']))
@@ -41,7 +42,7 @@ class RunnerFinalizationErrorsTests(unittest.TestCase):
                     diagnostics.append(copy.deepcopy(value))
                     if diagnostic_error is not None:raise diagnostic_error
             return original_json(path,value)
-        with patch.object(r,'atomic_text',side_effect=text),patch.object(r,'atomic_json',side_effect=saved):
+        with patch.object(r.output_publication,'publish_record',side_effect=publication),patch.object(r,'atomic_json',side_effect=saved):
             yield journals,diagnostics,writes
 
     def assert_unlocked(self):

@@ -1,6 +1,49 @@
 """Observe a file generation without reading its contents or owning task state."""
+from contextlib import contextmanager
 import os
 from pathlib import Path
+
+
+@contextmanager
+def stable_read_guard(path):
+    """Deny Windows writers/deletion only while a caller hashes this input.
+
+    ChangeTime can repeat for fast writes, so tokens alone cannot protect a
+    content read. Existing readers remain compatible; a preexisting writer or
+    delete-access handle prevents protection and must fail before reading.
+    The owned handle is released on exit; later processing is not protected.
+    """
+    if os.name!='nt':
+        yield
+        return
+    import ctypes
+    from ctypes import wintypes
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.CreateFileW.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,
+        wintypes.LPVOID,wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+    kernel.CreateFileW.restype=wintypes.HANDLE
+    kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+    kernel.CloseHandle.restype=wintypes.BOOL
+    # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING; NULL security attributes
+    # create an owned, non-inheritable handle. No writer/delete sharing.
+    handle=kernel.CreateFileW(str(path),0x80000000,1,None,3,0,None)
+    if handle in (None,ctypes.c_void_p(-1).value):
+        code=ctypes.get_last_error()
+        if code in (32,33):
+            raise ctypes.WinError(code,'输入文件正被其他程序写入或占用，请关闭编辑器或等待写入完成后重试')
+        raise ctypes.WinError(code)
+    primary=None
+    try:
+        yield
+    except BaseException as error:
+        primary=error
+        raise
+    finally:
+        if not kernel.CloseHandle(handle):
+            code=ctypes.get_last_error()
+            error=ctypes.WinError(code,f'关闭输入文件哈希保护句柄失败（CloseHandle）：{ctypes.FormatError(code).strip()}')
+            if primary is None:raise error
+            primary.add_note(str(error))
 
 
 def windows_file_change_time(descriptor):

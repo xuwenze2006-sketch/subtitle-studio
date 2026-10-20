@@ -1,5 +1,5 @@
 """Export staging and recovery protect real fixture-owned files and NTFS links."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -199,10 +199,10 @@ class MediaExportFileTests(unittest.TestCase):
                 before = (self.campaign / 'campaign.json').read_bytes()
                 workflow.emit.reset_mock()
                 with after_file_read(final, lambda: final.write_bytes(b'X' * len(original))) as changed:
-                    with self.assertRaisesRegex(ValueError, '成片.*变化'):
+                    with self.assertRaises(PermissionError if os.name=='nt' else ValueError):
                         workflow.export_video(self.campaign, self.stop, draft=draft)
                 self.assertTrue(changed)
-                self.assertEqual(final.read_bytes(), b'X' * len(original))
+                self.assertEqual(final.read_bytes(), original if os.name=='nt' else b'X' * len(original))
                 self.assertEqual((self.campaign / 'campaign.json').read_bytes(), before)
                 self.assert_no_success()
 
@@ -213,20 +213,19 @@ class MediaExportFileTests(unittest.TestCase):
                 workflow.export_video(self.campaign, self.stop, draft=draft)
                 final = video_output_path(self.source, 'zh-CN', draft=draft)
                 old = final.stat()
-                stat_token = lambda value: (value.st_dev, value.st_ino, value.st_size,
-                                             value.st_mtime_ns, value.st_ctime_ns)
+                original = final.read_bytes()
                 before = (self.campaign / 'campaign.json').read_bytes()
                 def rewrite_and_restore():
+                    # The write is refused while the final's hash guard owns
+                    # its handle, before restoring mtime could hide the change.
                     final.write_bytes(b'Z' * old.st_size)
                     os.utime(final, ns=(old.st_atime_ns, old.st_mtime_ns))
-                    # The previous five-part token really cannot detect this NTFS mutation.
-                    self.assertEqual(stat_token(final.stat()), stat_token(old))
                 workflow.emit.reset_mock()
                 with after_file_read(final, rewrite_and_restore) as changed:
-                    with self.assertRaisesRegex(ValueError, '成片.*变化'):
+                    with self.assertRaises(PermissionError):
                         workflow.export_video(self.campaign, self.stop, draft=draft)
                 self.assertTrue(changed)
-                self.assertEqual(final.read_bytes(), b'Z' * old.st_size)
+                self.assertEqual(final.read_bytes(), original)
                 self.assertEqual((self.campaign / 'campaign.json').read_bytes(), before)
                 self.assert_no_success()
 
@@ -253,7 +252,8 @@ class MediaExportFileTests(unittest.TestCase):
                     return int(succeeds)
                 kernel = SimpleNamespace(GetFileInformationByHandleEx=Mock(side_effect=unavailable))
                 workflow.emit.reset_mock()
-                with patch.object(ctypes, 'WinDLL', return_value=kernel), \
+                with patch.object(media_export.file_observation, 'stable_read_guard', side_effect=lambda path:nullcontext()), \
+                     patch.object(ctypes, 'WinDLL', return_value=kernel), \
                      patch.object(os, 'open', side_effect=opened):
                     with self.assertRaises(OSError):
                         workflow.export_video(self.campaign, self.stop, draft=True)
@@ -268,6 +268,7 @@ class MediaExportFileTests(unittest.TestCase):
     def test_existing_final_replaced_during_hash_never_repairs_manifest(self):
         workflow.export_video(self.campaign, self.stop, draft=True)
         final = video_output_path(self.source, 'zh-CN', draft=True)
+        original = final.read_bytes()
         old = final.stat()
         replacement = self.root / 'replacement.mp4'
         replacement.write_bytes(b'R' * old.st_size)
@@ -279,10 +280,10 @@ class MediaExportFileTests(unittest.TestCase):
         before = (self.campaign / 'campaign.json').read_bytes()
         workflow.emit.reset_mock()
         with after_file_read(final, lambda: replacement.replace(final)) as changed:
-            with self.assertRaisesRegex(ValueError, '成片.*变化'):
+            with self.assertRaises(PermissionError if os.name=='nt' else ValueError):
                 workflow.export_video(self.campaign, self.stop, draft=True)
         self.assertTrue(changed)
-        self.assertEqual(final.read_bytes(), b'R' * old.st_size)
+        self.assertEqual(final.read_bytes(), original if os.name=='nt' else b'R' * old.st_size)
         self.assertEqual((self.campaign / 'campaign.json').read_bytes(), before)
         self.assert_no_success()
 

@@ -1,5 +1,5 @@
 """Content-identical task recovery and stable single-pass input hashing, offline."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 import hashlib
 import json
@@ -242,26 +242,57 @@ class RunnerIdentityRecoveryTests(unittest.TestCase):
 
     def test_file_identity_rejects_source_replaced_after_hash(self):
         other = self.root / 'replacement.wav'
-        other.write_bytes(b'X' * len(self.content))
-        old = self.source.stat()
-        os.utime(other, ns=(old.st_atime_ns, old.st_mtime_ns))
         for stop in (None, threading.Event()):
             with self.subTest(cancellable=stop is not None):
+                self.source.write_bytes(self.content)
                 other.write_bytes(b'X' * len(self.content))
-                with observe_reads(self.source, after_close=lambda: other.replace(self.source)), \
-                     self.assertRaisesRegex(ValueError, '变化'):
-                    r.file_identity(self.source, stop)
+                old = self.source.stat()
+                os.utime(other, ns=(old.st_atime_ns, old.st_mtime_ns))
+                if os.name == 'nt':
+                    before = r.file_token(self.source)
+                    attempts = []
+                    def replace_while_guarded():
+                        with self.assertRaises(PermissionError):
+                            other.replace(self.source)
+                        attempts.append(True)
+                    with observe_reads(self.source, after_close=replace_while_guarded):
+                        identity = r.file_identity(self.source, stop)
+                    self.assertEqual(attempts, [True])
+                    self.assertEqual(r.file_token(self.source), before)
+                    self.assertEqual(identity['sha256'], hashlib.sha256(self.content).hexdigest())
+                    self.assertEqual(self.source.read_bytes(), self.content)
+                    other.replace(self.source)  # Protection ends with the hash.
+                else:
+                    with observe_reads(self.source, after_close=lambda: other.replace(self.source)), \
+                         self.assertRaisesRegex(ValueError, '变化'):
+                        r.file_identity(self.source, stop)
                 self.assertEqual(self.source.read_bytes(), b'X' * len(self.content))
 
     def test_file_identity_rejects_in_place_rewrite_after_hash_and_restored_mtime(self):
         for stop in (None, threading.Event()):
             with self.subTest(cancellable=stop is not None):
+                self.source.write_bytes(self.content)
                 old = self.source.stat()
                 def change():
                     self.source.write_bytes(b'Z' * old.st_size)
                     os.utime(self.source, ns=(old.st_atime_ns, old.st_mtime_ns))
-                with observe_reads(self.source, after_close=change), self.assertRaisesRegex(ValueError, '变化'):
-                    r.file_identity(self.source, stop)
+                if os.name == 'nt':
+                    before = r.file_token(self.source)
+                    attempts = []
+                    def change_while_guarded():
+                        with self.assertRaises(PermissionError):
+                            change()
+                        attempts.append(True)
+                    with observe_reads(self.source, after_close=change_while_guarded):
+                        identity = r.file_identity(self.source, stop)
+                    self.assertEqual(attempts, [True])
+                    self.assertEqual(r.file_token(self.source), before)
+                    self.assertEqual(identity['sha256'], hashlib.sha256(self.content).hexdigest())
+                    self.assertEqual(self.source.read_bytes(), self.content)
+                    change()  # A writable handle can be opened after the hash.
+                else:
+                    with observe_reads(self.source, after_close=change), self.assertRaisesRegex(ValueError, '变化'):
+                        r.file_identity(self.source, stop)
                 self.assertEqual(self.source.read_bytes(), b'Z' * old.st_size)
 
     def test_source_scan_stop_retains_cancelled_pipeline_result_without_state(self):
@@ -293,6 +324,7 @@ class RunnerIdentityRecoveryTests(unittest.TestCase):
                     return int(succeeds)
                 kernel = SimpleNamespace(GetFileInformationByHandleEx=Mock(side_effect=unavailable))
                 with patch.object(ctypes, 'WinDLL', return_value=kernel), \
+                     patch.object(r, 'stable_read_guard', return_value=nullcontext()), \
                      patch.object(os, 'open', side_effect=opened), observe_reads(self.source) as reads, \
                      self.assertRaises(OSError):
                     r.file_identity(self.source, threading.Event())

@@ -49,20 +49,21 @@ from subtitle_pipeline import runner as r
 from subtitle_pipeline.subtitles import Cue
 source, project = Path(sys.argv[1]), Path(sys.argv[2])
 output_name, before = sys.argv[3], sys.argv[4] == 'before'
-real_write = r.atomic_text
-def write(path, text):
-    target = path.parent == project and path.name == output_name
+real_publish = r.output_publication.publish_record
+def publish(project_path, record, *args, **kwargs):
+    target = record['relative'] == output_name
     if target and before:
         os._exit(17)
-    real_write(path, text)
+    result = real_publish(project_path, record, *args, **kwargs)
     if target:
         os._exit(17)
+    return result
 def blocked(*args, **kwargs):
     raise AssertionError('Outbound network disabled')
 with patch.object(socket.socket, 'connect', blocked), patch.object(socket.socket, 'connect_ex', blocked), patch.object(socket, 'create_connection', blocked), \
      patch.object(r, 'probe_media', return_value=9000), patch.object(r, 'detect_silences', return_value=[]), \
      patch.object(r, 'recognize_chunk', return_value=[Cue(100,900,'cached source')]), \
-     patch.object(r, 'translate_texts', return_value=['cached translation']), patch.object(r, 'atomic_text', side_effect=write):
+     patch.object(r, 'translate_texts', return_value=['cached translation']), patch.object(r.output_publication, 'publish_record', side_effect=publish):
     r.run_pipeline(r.PipelineConfig(source, project, chunk_seconds=10, overlap_seconds=1))
 '''
         child=subprocess.run([sys.executable,'-c',script,str(config.source),str(config.project),

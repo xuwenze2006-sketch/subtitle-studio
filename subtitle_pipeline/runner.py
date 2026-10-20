@@ -24,7 +24,8 @@ from .atomic_io import cleanup_temporary, replace_with_retry
 from .windows_job import owned_process
 from .languages import validate_languages, target_filename, output_names, manifest_languages
 from . import translation_context
-from .file_observation import file_token
+from . import output_publication
+from .file_observation import file_token, stable_read_guard
 from .integrity import (sha256, fingerprint, reconcile_source, reconcile_translation,
                         HumanEditConflict, verify_part, validate_chunk_plan, evidence_matches,
                         sample_state_evidence, reconcile_merged_source, valid_translation_content)
@@ -32,6 +33,10 @@ from .integrity import (sha256, fingerprint, reconcile_source, reconcile_transla
 
 class Cancelled(RuntimeError):
     pass
+
+
+class _OutputPublicationConflict(HumanEditConflict):
+    """Stop scheduling while a displaced output still needs human review."""
 
 
 class _WorkerStop:
@@ -146,9 +151,17 @@ def _recover_pending_outputs(project, state):
     journal=state['pending_outputs']
     names=output_names(state['identity'].get('target','zh-CN'))
     allowed=set(names)|{str(Path('自动更新')/name) for name in names}|{'需复核.json','需复核.txt'}
+    checkpoint=_output_checkpoint(state)
     if (not isinstance(journal,dict) or type(journal.get('version')) is not int
-        or journal['version']!=1 or journal.get('identity')!=fingerprint(state['identity'])
-        or journal.get('checkpoint')!=_output_checkpoint(state)
+        or journal['version'] not in (1,2) or journal.get('identity')!=fingerprint(state['identity'])
+        or not isinstance(journal.get('checkpoint'),str)
+        or re.fullmatch(r'[0-9a-f]{64}',journal['checkpoint']) is None
+        or (journal['checkpoint']!=checkpoint and not (
+            journal['version']==2 and journal.get('owned_results_checkpoint')==checkpoint))
+        or ('owned_results_checkpoint' in journal and (
+            journal['version']!=2 or not isinstance(journal['owned_results_checkpoint'],str)
+            or re.fullmatch(r'[0-9a-f]{64}',journal['owned_results_checkpoint']) is None
+            or journal['owned_results_checkpoint']!=checkpoint))
         or not isinstance(journal.get('outputs'),dict) or not 1<=len(journal['outputs'])<=5):
         raise HumanEditConflict('字幕输出恢复记录无效，请保留状态和字幕文件后核对')
     for relative,digest in journal['outputs'].items():
@@ -156,6 +169,23 @@ def _recover_pending_outputs(project, state):
             or re.fullmatch(r'[0-9a-f]{64}',digest) is None
             or not (project/relative).resolve().is_relative_to(project.resolve())):
             raise HumanEditConflict('字幕输出恢复记录的路径或校验值无效，请保留文件后核对')
+    if journal['version']==2:
+        records=journal.get('publications')
+        if not isinstance(records,list) or not 1<=len(records)<=5:
+            raise HumanEditConflict('字幕发布恢复清单无效，请保留文件后核对')
+        destinations=set();attempts=set()
+        # Validate the entire batch before the first recovery can change files.
+        for record in records:
+            output_publication.validate_record(project,record)
+            relative=record['relative']
+            if (relative not in journal['outputs']
+                    or record['digest']!=journal['outputs'][relative]
+                    or relative in destinations or record['attempt'] in attempts):
+                raise HumanEditConflict('字幕发布恢复清单与输出不符，请保留文件后核对')
+            destinations.add(relative);attempts.add(record['attempt'])
+        for record in records:
+            _check_output_publication(state,record,
+                output_publication.recover_record(project,record))
     recovered={}
     for relative,digest in journal['outputs'].items():
         path=project/relative
@@ -165,6 +195,14 @@ def _recover_pending_outputs(project, state):
     # hash. Normal regeneration/edit reconciliation handles those separately.
     state.setdefault('generated_hashes',{}).update(recovered)
     state.pop('pending_outputs')
+
+
+def _check_output_publication(state,record,result):
+    if result['status']!='clean':
+        state['review_status']='needs_review'
+        retained=result.get('capture') or record['relative']
+        raise _OutputPublicationConflict(f'发布期间字幕发生变化或仍被占用；文件已保留：{retained}；'
+            f'恢复目录：{record["attempt"]}。请先核对并另存人工版本，再处理恢复目录后继续；未确认任务完成')
 
 
 def probe_media(source: Path, stop=None) -> int:
@@ -264,18 +302,19 @@ def file_identity(path, stop=None):
     _check_identity_stop(stop)
     path = Path(path).resolve()
     try:
-        if not path.is_file():
-            path.stat()  # Preserve an absent/inaccessible input's original error.
-            raise ValueError('输入必须是文件')
-        before=file_token(path)
-        _check_identity_stop(stop)
-        if stop is None:
-            digest = sha256(path)
-        else:
-            from .export_io import cancellable_sha256
-            digest = cancellable_sha256(path, stop)
-        _check_identity_stop(stop)
-        after=file_token(path)
+        with stable_read_guard(path):
+            if not path.is_file():
+                path.stat()  # Preserve an absent/inaccessible input's original error.
+                raise ValueError('输入必须是文件')
+            before=file_token(path)
+            _check_identity_stop(stop)
+            if stop is None:
+                digest = sha256(path)
+            else:
+                from .export_io import cancellable_sha256
+                digest = cancellable_sha256(path, stop)
+            _check_identity_stop(stop)
+            after=file_token(path)
     except (OSError,ValueError) as error:
         _check_identity_stop(stop,error)
         raise
@@ -297,6 +336,30 @@ def _task_identity_matches(saved, current):
                 result[name]={key:item for key,item in value.items() if key!='mtime_ns'}
         return result
     return content_identity(saved)==content_identity(current)
+
+
+def _read_seed_cues(path, identity, stop):
+    """Parse only the same bytes whose digest is bound to this task."""
+    raw=bytearray()
+    digest=hashlib.sha256()
+    _check_identity_stop(stop)
+    try:
+        with Path(path).open('rb') as source:
+            while True:
+                _check_identity_stop(stop)
+                chunk=source.read(1024*1024)
+                _check_identity_stop(stop)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+                digest.update(chunk)
+    except OSError as error:
+        _check_identity_stop(stop,error)
+        raise
+    if len(raw)!=identity['size'] or digest.hexdigest()!=identity['sha256']:
+        raise ValueError('导入字幕在核对后发生变化，请重试；已有文件保留')
+    _check_identity_stop(stop)
+    return parse_srt(raw.decode('utf-8-sig'))
 
 
 def cloud_context(config):
@@ -583,6 +646,7 @@ def _run_locked(config, stop, progress):
     try:
         source_identity=file_identity(config.source,stop=stop)
         seed_identity=file_identity(config.seed_srt,stop=stop) if config.seed_srt else None
+        seeded_raw=_read_seed_cues(config.seed_srt,seed_identity,stop) if config.seed_srt else []
     except Cancelled:
         return {'status':'cancelled','message':'已停止准备','total':0,'recognized':0,'translated':0}
     identity = {'source':source_identity, 'language':config.language, 'target':config.target, 'chunk_seconds':config.chunk_seconds, 'overlap_seconds':config.overlap_seconds, 'engine':config.asr_provider,'api':config.asr_api_version,'translation_provider':config.translation_provider,'translation_model':config.translation_model, 'seed_layout':2, 'seed':seed_identity, 'seed_complete_until_ms':config.seed_complete_until_ms}
@@ -592,7 +656,6 @@ def _run_locked(config, stop, progress):
         identity['asr_model']=config.asr_model
         if config.workflow_stage=='full':
             validate_full_approval(config,identity['source']['sha256'])
-    seeded_raw = parse_srt(config.seed_srt.read_text(encoding='utf-8-sig')) if config.seed_srt else []
     if state_path.exists():
         state = json.loads(state_path.read_text(encoding='utf-8'))
         if config.workflow_stage!='draft' and any(
@@ -894,14 +957,29 @@ def _run_locked(config, stop, progress):
             # Persist completed part records and exact publication intent before
             # replacing the first output; an abrupt exit cannot mislabel our own
             # new subtitle as a user edit or lose completed paid work.
-            state['pending_outputs']={'version':1,'identity':fingerprint(state['identity']),
-                'checkpoint':_output_checkpoint(state),
-                'outputs':{relative:digest for relative,(_,digest,_) in planned.items()}}
+            records=[]
             try:
-                atomic_json(state_path,state)
                 for relative,(text,digest,current) in planned.items():
                     if digest!=current:
-                        atomic_text(project/relative,text)
+                        records.append(output_publication.prepare_publication(project,relative,text,current))
+            except BaseException as error:
+                for record in records:
+                    try:
+                        output_publication.discard_prepared(project,record)
+                    except Exception as cleanup_error:
+                        _note_secondary_error(error,'未发布字幕准备文件清理失败',cleanup_error)
+                raise
+            state['pending_outputs']={'version':2,'identity':fingerprint(state['identity']),
+                'checkpoint':_output_checkpoint(state),
+                'outputs':{relative:digest for relative,(_,digest,_) in planned.items()},
+                'publications':records}
+            try:
+                atomic_json(state_path,state)
+                for record in records:
+                    result=output_publication.publish_record(project,record)
+                    _check_output_publication(state,record,result)
+                    if not result['published']:
+                        raise OSError('字幕发布未完成，已有文件和准备记录保留，请重试')
             except BaseException as error:
                 journal=state['pending_outputs']
                 recovered=False
@@ -940,6 +1018,7 @@ def _run_locked(config, stop, progress):
     def recover_owned_results(primary):
         # Both executor contexts have exited. Recover only these still-owned
         # futures, never infer completion from files or submit additional work.
+        publication_journal=state.get('pending_outputs')
         diagnostic={'type':type(primary).__name__,'message':str(primary),
                     'recovered_asr':0,'recovered_translation':0}
         state['scheduler_error']=diagnostic
@@ -999,6 +1078,14 @@ def _run_locked(config, stop, progress):
                         state['parts'][str(chunk.index)].update(translation='needs_review',translation_error=str(error))
                         state['review_status']='needs_review'
                     _note_secondary_error(primary,stage,error)
+        journal=state.get('pending_outputs')
+        if (isinstance(primary,_OutputPublicationConflict) and journal is publication_journal
+                and isinstance(journal,dict) and journal.get('version')==2
+                and journal.get('identity')==fingerprint(state['identity'])):
+            # The original publication checkpoint remains intact. This second
+            # checkpoint binds only the later, verified owned-worker results;
+            # the captured output still represents the earlier publication.
+            journal['owned_results_checkpoint']=_output_checkpoint(state)
 
     preparation_cancelled = False
     body_failed=False
@@ -1165,11 +1252,17 @@ def _run_locked(config, stop, progress):
                             part.update(result)
                             part['translation']='done'
                             part.pop('translation_error',None)
-                        combine()
+                        try:
+                            combine()
+                        except HumanEditConflict as error:
+                            if isinstance(error,_OutputPublicationConflict):raise
+                            raise _OutputPublicationConflict(str(error)) from error
                         publish(f'第 {chunk.index+1}/{total} 段：'+('识别、检查已保存' if is_asr else '译文已保存'))
                     except (Cancelled,futures.CancelledError):
                         pass
                     except Exception as exc:
+                        if isinstance(exc,_OutputPublicationConflict):
+                            raise
                         if not is_asr and isinstance(exc,HumanEditConflict):
                             part.update(translation='needs_review',translation_error=str(exc))
                             state['review_status']='needs_review'
@@ -1227,6 +1320,9 @@ def _run_locked(config, stop, progress):
                 'message':str(error),'final_state_saved_before_error':saved_before_error}
             state['message']=('字幕与任务状态已保存，但进度通知失败；未确认本次收尾完成' if saved_before_error
                               else '字幕合并或任务收尾保存失败；已有文件和恢复记录保留，请重试')
+            if isinstance(error,HumanEditConflict):
+                state['review_status']='needs_review'
+                state['message']=str(error)
             expected=[state['parts'].get(str(ch.index),{}) for ch in chunks]
             state.update(total=total,recognized=sum(p.get('asr')=='done' for p in expected),
                          translated=sum(p.get('translation')=='done' for p in expected),updated=time.time())
