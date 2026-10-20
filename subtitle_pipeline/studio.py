@@ -148,6 +148,7 @@ class StudioController:
         recent=saved.get('recent',[])
         self.recent=[x for x in recent if isinstance(x,dict) and isinstance(x.get('path'),str)][:12] if isinstance(recent,list) else []
         self.stop_event=threading.Event()
+        self._stop_io_lock=threading.Lock()
         self.worker=None
         self._redactions=[]
         self._cancel_marker=None
@@ -194,17 +195,17 @@ class StudioController:
                 'logs':[self._scrub(line,500) for line in logs[-30:] if isinstance(line,str)] if isinstance(logs,list) else [],
                 'interrupted':value.get('interrupted') is True}
 
-    def _remember_job(self):
+    def _remember_job(self,identity=None):
         summary=self._run_summary(self.job)
         if not summary or not self.campaign:return
-        identity=self._project_id()
+        if identity is None:identity=self._project_id()
         self._last_runs.pop(identity,None)
         self._last_runs[identity]=summary
         self._last_runs=dict(list(self._last_runs.items())[-12:])
 
-    def _restore_job(self):
+    def _restore_job(self,identity=None):
         job=self._idle_job()
-        try:summary=self._last_runs.get(self._project_id())
+        try:summary=self._last_runs.get(self._project_id() if identity is None else identity)
         except (ValueError,OSError):return job
         if not summary:return job
         job.update(summary,restored=True,busy=False)
@@ -331,11 +332,12 @@ class StudioController:
         self.persistence_warning=('界面运行记录暂时无法保存；当前任务继续执行，请以项目目录中的处理结果为准。'
                                   if failed else '')
 
-    def _queue_persist_locked(self,status_hint=None):
+    def _queue_persist_locked(self,status_hint=None,*,identity=None):
         self._persist_revision+=1
         revision=self._persist_revision
         try:
-            self._remember_job()
+            if identity is None:self._remember_job()
+            else:self._remember_job(identity)
             if self.campaign:
                 status=self.job['status'] if self.job['action'] else status_hint or self.job['status']
                 entry={'path':self.campaign,'title':Path(self.source).stem if self.source else Path(self.campaign).name,
@@ -597,55 +599,81 @@ class StudioController:
             return
         raise ValueError('此目录不是可识别的字幕项目，或项目配置已损坏；新任务请使用“新建任务”')
 
+    def _selection_payload(self,data):
+        """Load and restore a candidate using only a private selection view."""
+        fresh=data.get('new_task',False)
+        if type(fresh) is not bool:raise ValueError('新建任务选项必须为布尔值')
+        values={}
+        status_hint=None
+        for name in ('source','campaign','baseline'):
+            if name in data:
+                value=data[name]
+                if not isinstance(value,str) or len(value)>4096 or '\0' in value:raise ValueError('文件路径无效')
+                values[name]=str(Path(value).expanduser().resolve()) if value.strip() else ''
+        if fresh:
+            if not values.get('source'):raise ValueError('新建任务请先选择素材')
+            values.setdefault('baseline','')
+            if values.get('campaign'):
+                selected=Path(values['campaign'])
+                if selected.exists() and (not selected.is_dir() or any(
+                        p.name!='run.guard.lock' or not p.is_file() or p.is_symlink() for p in selected.iterdir())):
+                    raise ValueError('新建任务需要空项目目录；若要使用已有结果，请选择载入任务')
+            else:
+                base=timestamped_project(Path(values['source']),ROOT/'字幕任务')
+                selected=base;index=2
+                reserved={x['path'] for x in self.recent}
+                while selected.exists() or selected.is_symlink() or str(selected) in reserved:
+                    selected=base.with_name(f'{base.name}-{index:02d}');index+=1
+                values['campaign']=str(selected)
+        if values.get('campaign'):
+            path=Path(values['campaign'])
+            old=read_json(self._contained_path(path,'state.json'))
+            manifest=read_json(self._contained_path(path,'campaign.json'))
+            status_hint=manifest.get('status') or old.get('status')
+            if not fresh and 'source' not in data:self._validate_loaded_project(path,old,manifest)
+            stored_source=old.get('config',{}).get('source') or manifest.get('source',{}).get('path')
+            if stored_source and values.get('source') and Path(stored_source).resolve()!=Path(values['source']).resolve():
+                raise ValueError('这个项目已属于另一个素材，请为新素材选择新的输出项目')
+            if old.get('config'):
+                config=project_config_from_state(old)
+                values['source']=str(config['source'])
+            elif manifest.get('source',{}).get('path'):
+                values.update(source=manifest['source']['path'],baseline=manifest.get('baseline') or '')
+            else:
+                recent=next((x for x in self.recent if x['path']==str(path)),{})
+                if 'source' not in values and recent.get('source'):values['source']=recent['source']
+        elif not fresh and 'campaign' in data and 'source' not in data:
+            raise ValueError('请先选择要载入的字幕项目目录')
+        previous_identity=self._project_id() if self.campaign and self._run_summary(self.job) else None
+        self._remember_job(previous_identity)
+        for name,value in values.items():setattr(self,name,value)
+        if self.source and not self.campaign:self.campaign=str(default_project(Path(self.source),ROOT/'字幕任务'))
+        identity=self._project_id()
+        self.job=self._restore_job(identity)
+        return fresh,status_hint,previous_identity,identity
+
     def select_project(self,data):
         with self.lock:
+            if self._closing:raise RuntimeError('本机服务正在退出，请重新打开工作台后继续。')
             if self.job['busy']:raise ValueError('请先停止当前任务，再切换项目')
-            fresh=data.get('new_task',False)
-            if type(fresh) is not bool:raise ValueError('新建任务选项必须为布尔值')
-            values={}
-            status_hint=None
-            for name in ('source','campaign','baseline'):
-                if name in data:
-                    value=data[name]
-                    if not isinstance(value,str) or len(value)>4096 or '\0' in value:raise ValueError('文件路径无效')
-                    values[name]=str(Path(value).expanduser().resolve()) if value.strip() else ''
-            if fresh:
-                if not values.get('source'):raise ValueError('新建任务请先选择素材')
-                values.setdefault('baseline','')
-                if values.get('campaign'):
-                    selected=Path(values['campaign'])
-                    if selected.exists() and (not selected.is_dir() or any(
-                            p.name!='run.guard.lock' or not p.is_file() or p.is_symlink() for p in selected.iterdir())):
-                        raise ValueError('新建任务需要空项目目录；若要使用已有结果，请选择载入任务')
-                else:
-                    base=timestamped_project(Path(values['source']),ROOT/'字幕任务')
-                    selected=base;index=2
-                    reserved={x['path'] for x in self.recent}
-                    while selected.exists() or selected.is_symlink() or str(selected) in reserved:
-                        selected=base.with_name(f'{base.name}-{index:02d}');index+=1
-                    values['campaign']=str(selected)
-            if values.get('campaign'):
-                path=Path(values['campaign'])
-                old=read_json(self._contained_path(path,'state.json'))
-                manifest=read_json(self._contained_path(path,'campaign.json'))
-                status_hint=manifest.get('status') or old.get('status')
-                if not fresh and 'source' not in data:self._validate_loaded_project(path,old,manifest)
-                stored_source=old.get('config',{}).get('source') or manifest.get('source',{}).get('path')
-                if stored_source and values.get('source') and Path(stored_source).resolve()!=Path(values['source']).resolve():
-                    raise ValueError('这个项目已属于另一个素材，请为新素材选择新的输出项目')
-                if old.get('config'):
-                    config=project_config_from_state(old)
-                    values['source']=str(config['source'])
-                elif manifest.get('source',{}).get('path'):
-                    values.update(source=manifest['source']['path'],baseline=manifest.get('baseline') or '')
-                else:
-                    recent=next((x for x in self.recent if x['path']==str(path)),{})
-                    if 'source' not in values and recent.get('source'):values['source']=recent['source']
-            elif not fresh and 'campaign' in data and 'source' not in data:
-                raise ValueError('请先选择要载入的字幕项目目录')
-            self._remember_job()
-            for name,value in values.items():setattr(self,name,value)
-            if self.source and not self.campaign:self.campaign=str(default_project(Path(self.source),ROOT/'字幕任务'))
+            selection=self._selection_revision
+            previous_job=self.job
+            view=self._snapshot_view_locked()
+            # Only selection preflight needs private history/redaction copies.
+            # Ordinary read views retain no ownership of either live collection.
+            view._last_runs=deepcopy(self._last_runs)
+            view._redactions=list(self._redactions)
+        fresh,status_hint,previous_identity,identity=view._selection_payload(deepcopy(data))
+        with self.lock:
+            if self._closing:raise RuntimeError('本机服务正在退出，请重新打开工作台后继续。')
+            if selection!=self._selection_revision:
+                raise ProjectSelectionChanged('其他窗口已切换项目，请刷新当前结果后再操作')
+            if self.job['busy']:raise ValueError('请先停止当前任务，再切换项目')
+            if self.job is not previous_job:raise RuntimeError('任务状态已变化，请刷新当前结果后再切换项目。')
+            # Merge current history; a detached copy must not overwrite saves
+            # that completed while loading. Both identities were resolved above.
+            self._remember_job(previous_identity)
+            self.source,self.campaign,self.baseline=view.source,view.campaign,view.baseline
             if fresh:
                 # Keep metadata out of the new directory: both initializers
                 # deliberately require an empty destination before processing.
@@ -653,8 +681,8 @@ class StudioController:
                     x for x in self.recent if x['path']!=self.campaign][:11]
             self._selection_revision+=1
             selection=self._selection_revision
-            self.job=self._restore_job()
-            self._queue_persist_locked(status_hint)
+            self.job=view.job
+            self._queue_persist_locked(status_hint,identity=identity)
         self._drain_persistence()
         with self.lock:
             if selection!=self._selection_revision:
@@ -803,6 +831,7 @@ class StudioController:
                 raise RuntimeError('本机账户或计价配置已变化，请重新确认后再开始任务。')
             self._redactions=redactions
             self.stop_event=threading.Event()
+            self._stop_io_lock=threading.Lock()
             self._cancel_marker=(self.state_path.parent/'stops'/(secrets.token_hex(16)+'.stop')) if action!='local' else None
             self.job={**self._idle_job(),'busy':True,'action':action,'status':'starting','message':'正在准备任务…'}
             self._queue_persist_locked()
@@ -931,13 +960,34 @@ class StudioController:
     def stop(self):
         with self.lock:
             if not self.job['busy']:return {'stopped':False}
-            if self.job['action']!='local':
-                marker=self._cancel_marker
-                if marker:
+            job,event,marker,io_lock=self.job,self.stop_event,self._cancel_marker,self._stop_io_lock
+        def owns_run():
+            return (self.job is job and self.stop_event is event and self._cancel_marker is marker
+                    and self._stop_io_lock is io_lock and job['busy'])
+        # Never wait for another marker writer while holding the live lock.
+        # New runs receive a different I/O lock and cannot wait behind this run.
+        with io_lock:
+            with self.lock:
+                if not owns_run():return {'stopping':True}
+            error=None
+            try:
+                if job['action']!='local' and marker is not None:
                     marker.parent.mkdir(parents=True,exist_ok=True)
                     marker.write_text('Stop requested for this run',encoding='utf-8')
-            self.stop_event.set()
-            self._progress_locked({'message':'正在停止后续工作，等待当前步骤保存…'})
+            except BaseException as caught:error=caught
+            with self.lock:
+                current=owns_run()
+                if current and error is None:
+                    event.set()
+                    self._progress_locked({'message':'正在停止后续工作，等待当前步骤保存…'})
+            if not current and job['action']!='local' and marker is not None:
+                # Finish may have removed the marker before this writer created
+                # it. Keep duplicate writers serialized through this cleanup.
+                try:marker.unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    if error is None:raise
+                    error.add_note(f'临时停止标记清理失败：{cleanup_error}')
+            if error is not None:raise error
         self._drain_persistence()
         return {'stopping':True}
 
