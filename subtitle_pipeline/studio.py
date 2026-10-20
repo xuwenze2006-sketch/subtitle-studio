@@ -1260,7 +1260,13 @@ class StudioController:
         state=read_json(self._contained_path(folder,'state.json'))
         # A content-bound manual overlay is shared by preview and exports;
         # the original generation evidence and machine subtitles stay intact.
-        if source and target and type(state.get('duration_ms')) is int and state.get('identity',{}).get('source',{}).get('sha256'):
+        identity=state.get('identity')
+        source_identity=identity.get('source') if isinstance(identity,dict) else None
+        record=self._contained_path(self._contained_path(folder,'人工校对'),'校对记录.json')
+        # An existing overlay must report a binding conflict even when its
+        # base metadata/tracks are damaged, never silently disappear.
+        if record.exists() or (source and target and type(state.get('duration_ms')) is int
+                and isinstance(source_identity,dict) and source_identity.get('sha256')):
             try:
                 from .manual_review import load_review
                 review=load_review(folder,language=language,target=target_language)
@@ -1281,6 +1287,7 @@ class StudioController:
         if manifest:return manifest_languages(manifest)
         folder=selected.get('folder')
         config=read_json(self._contained_path(folder,'state.json')).get('config',{}) if folder else {}
+        if not isinstance(config,dict):raise ValueError('项目语言配置损坏，请保留原文件并检查')
         return config.get('language','ja'),config.get('target','zh-CN')
 
     def download_path(self,name,sample=None,project_id=None):

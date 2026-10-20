@@ -93,6 +93,7 @@ function PreviewSession({
   const reviewDraftRef = useRef(reviewDraft);
   const selectedId = preview?.selected_id || selection || selections[0]?.id || "main";
   const reviewBusy = reviewActionBusy || reviewSubmissions.pending(selectedId);
+  const reviewPending = hasPendingReviewSubmissions(submissionOwner);
   const reviewDirty = isReviewDirty(reviewDraft);
   useLayoutEffect(() => {
     const previous = reviewDraftRef.current;
@@ -112,14 +113,14 @@ function PreviewSession({
   }, [projectKey, reviewDraft]);
   const restoreReviewDraft = useCallback(data => {
     const current = reviewDraftRef.current;
-    if (!data.manual_review?.supported || isReviewDirty(current)) return;
+    if (isReviewDirty(current)) return;
     const recovered = readReviewDraft(projectKey, data.selected_id);
     setDraftStorageWarning(recovered.error ? "本机草稿读取失败，当前编辑和保存仍可继续。" : "");
     if (recovered.draft) {
       setReviewDraft(recovered.draft);
       setReviewNotice(isReviewDirty(recovered.draft) ? "已恢复本机未保存草稿，请核对后保存。"
         : "已恢复本机校对草稿，请核对当前保存内容。");
-    } else if (current?.sample === data.selected_id) {
+    } else if (data.manual_review?.supported && current?.sample === data.selected_id) {
       const cue = data.cues.find(item => item.id === current.cueId);
       setReviewDraft(cue ? createReviewDraft(cue, data.manual_review.revision, data.selected_id) : null);
     }
@@ -202,6 +203,9 @@ function PreviewSession({
       .catch((error) => {
         if (!controller.signal.aborted && version === requestVersion.current) {
           setLoadFailed(true);
+          // A failed preview cannot supply a revision, but this exact project
+          // and requested segment can still reveal its stored draft safely.
+          restoreReviewDraft({ selected_id: selection || "main" });
           onError(error.message);
         }
       })
@@ -243,6 +247,7 @@ function PreviewSession({
   const hasActiveDraft = !!activeReviewDraft;
   const missingDraftCue = useMemo(() => supportsReview && hasActiveDraft && !cues.some(cue => cue.id === activeDraftCueId),
     [supportsReview, hasActiveDraft, cues, activeDraftCueId]);
+  const recoveryDraft = missingDraftCue || (reviewDirty && (!supportsReview || !activeReviewDraft)) ? reviewDraft : null;
   const draftConflict = !supportsReview || !activeReviewDraft ? "" : missingDraftCue
     ? "草稿对应的原句已不存在，内容已保留，请复制需要的内容或放弃草稿"
     : activeReviewDraft.revision !== preview.manual_review.revision
@@ -566,7 +571,8 @@ function PreviewSession({
     setLocateRequest({ index });
   };
   const discardReviewDraft = () => {
-    const cue = cues.find(item => item.id === reviewDraft?.cueId);
+    if (reviewBusy || hasPendingReviewSubmissions(submissionOwner)) return;
+    const cue = supportsReview && reviewDraft?.sample === selectedId ? cues.find(item => item.id === reviewDraft.cueId) : null;
     const cleared = clearReviewDraft(projectKey, reviewDraft?.sample || selectedId);
     setDraftStorageWarning(cleared.error === "draft-conflict" ? "已放弃当前输入；其他窗口的本机草稿已保留。"
       : cleared.error ? "已放弃当前输入，但本机草稿暂时无法清除。" : "");
@@ -875,14 +881,15 @@ function PreviewSession({
                 {loadFailed ? "点击上方“刷新结果”重新读取。" : cues.length ? reviewFilter !== "all" ? "切换核对状态筛选，或清空搜索查看其他字幕。" : "换一个关键词，或清空搜索查看全部字幕。" : "完成识别后，在这里逐句核对文字和时间轴。"}
               </Empty>
           </CueTimeline>
-          {supportsReview && draftStorageWarning && <p className="manual-review-warning">{draftStorageWarning}</p>}
-          {missingDraftCue && <section className="manual-review" aria-label="恢复的草稿内容">
+          {draftStorageWarning && <p className="manual-review-warning">{draftStorageWarning}</p>}
+          {recoveryDraft && <section className="manual-review" aria-label="恢复的草稿内容">
             <h3>恢复的草稿内容</h3>
-            <p>{activeReviewDraft.fields.start} → {activeReviewDraft.fields.end}</p>
-            <label>草稿原文<textarea rows={3} readOnly value={activeReviewDraft.fields.source_text} /></label>
-            <label>草稿译文<textarea rows={3} readOnly value={activeReviewDraft.fields.target_text} /></label>
-            <label>草稿核对备注<textarea rows={2} readOnly value={activeReviewDraft.fields.note} /></label>
-            <Button onClick={discardReviewDraft} disabled={reviewBusy}>放弃未保存修改</Button>
+            {!supportsReview && <p>当前预览暂时无法用于校对，未保存内容已保留。可复制草稿，刷新结果后继续，或放弃修改后切换任务。</p>}
+            <p>{recoveryDraft.fields.start} → {recoveryDraft.fields.end}</p>
+            <label>草稿原文<textarea rows={3} readOnly value={recoveryDraft.fields.source_text} /></label>
+            <label>草稿译文<textarea rows={3} readOnly value={recoveryDraft.fields.target_text} /></label>
+            <label>草稿核对备注<textarea rows={2} readOnly value={recoveryDraft.fields.note} /></label>
+            <Button onClick={discardReviewDraft} disabled={reviewBusy || reviewPending}>放弃未保存修改</Button>
           </section>}
           {supportsReview && <ManualReview preview={preview} selectedId={selectedId} draft={activeReviewDraft}
             onDraftChange={setReviewDraft} onDiscard={discardReviewDraft} onSave={saveReviewCue} onRefresh={refreshReview} onAccept={acceptReview} onNext={nextUnchecked}
