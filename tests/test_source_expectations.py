@@ -283,12 +283,12 @@ class SourceExpectationsTests(unittest.TestCase):
             with self.assertRaises(Cancelled):self.sample(expected_source=self.expected,stop=self.stop)
 
     def test_late_actual_read_can_accept_early_bad_bytes_repaired_before_it(self):
-        self.source.write_bytes(b'x'*len(self.content));original=Path.read_text
+        self.source.write_bytes(b'x'*len(self.content));original=Path.read_bytes
         def read(path,*args,**kwargs):
             text=original(path,*args,**kwargs)
             if path==self.state_path:self.source.write_bytes(self.content)
             return text
-        with patch.object(Path,'read_text',read),self.source_reads() as records:
+        with patch.object(Path,'read_bytes',read),self.source_reads() as records:
             proof=self.sample(expected_source=self.expected,stop=self.stop)
         self.assertEqual(proof['source_sha256'],self.digest)
         self.assert_full_reads(records,[self.source])

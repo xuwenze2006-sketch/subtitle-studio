@@ -118,6 +118,7 @@ export default function App() {
   const [connection, setConnection] = useState("connecting");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [stateRefreshError, setStateRefreshError] = useState("");
   const [pending, setPending] = useState("");
   const [openReceipt, setOpenReceipt] = useState(null);
   const [freshTask, setFreshTask] = useState(false);
@@ -191,6 +192,7 @@ export default function App() {
     }
     observedJob.current = {identity, busy:!!data.job?.busy};
     setSnapshot(data);
+    setStateRefreshError("");
     setConnection("connected");
     if (!initialized.current) {
       applyProject(data);
@@ -250,17 +252,25 @@ export default function App() {
     setPending(name);
     setError("");
     setSuccess("");
+    let refreshOwnsLock = false;
+    const release = () => { lock.current = false; setPending(""); };
     try {
       await operation();
-      if (refreshAfter) await refresh();
       setSuccess(message);
+      // The operation already has its acknowledgement. A failed follow-up read
+      // must not turn a committed save into failure or retain the entered key.
+      if (refreshAfter) {
+        refreshOwnsLock = true;
+        void refresh().catch(failure => setStateRefreshError(failure.message)).finally(release);
+      }
       return true;
     } catch (failure) {
       setError(failure.message);
       return false;
     } finally {
-      lock.current = false;
-      setPending("");
+      // Acknowledgement reaches the form immediately; keep other operations
+      // serialized until the independently handled state read finishes.
+      if (!refreshOwnsLock) release();
     }
   };
 
@@ -548,7 +558,12 @@ export default function App() {
               {shownOpenReceipt.copyMessage && <small>{shownOpenReceipt.copyMessage}</small>}
             </section>
           )}
-          {(error || success || (completion && !draft)) && <section className="app-action-feedback" aria-label="操作反馈">
+          {(error || success || stateRefreshError || (completion && !draft)) && <section className="app-action-feedback" aria-label="操作反馈">
+          {stateRefreshError && <Notice tone="warning" title="操作已完成，任务状态暂未更新"
+            action={<Button disabled={disabled} busy={pending === "refresh-state"}
+              onClick={() => perform("refresh-state", refresh, success, { refreshAfter: false })}>刷新任务状态</Button>}>
+            {stateRefreshError} 已完成的操作不会自动重试。
+          </Notice>}
           {error && (
             <Notice
               tone="error"

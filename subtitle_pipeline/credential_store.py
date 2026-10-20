@@ -18,6 +18,8 @@ import sys
 import tempfile
 import time
 
+from .api_key import is_transport_key
+
 
 SUPPORTED_KEYS = ('SILICONFLOW_API_KEY', 'DASHSCOPE_API_KEY', 'DEEPSEEK_API_KEY')
 _VERSION = 1
@@ -191,6 +193,8 @@ def save_secrets(values: dict[str, str], path: str | Path | None = None) -> None
     """Validate and merge supported keys, then atomically persist ciphertext."""
     _require_windows()
     values = _validated(values)
+    if any(not is_transport_key(value) for value in values.values()):
+        raise CredentialStoreError('API Key 含有不支持的字符，请检查是否误粘贴了其他文字。')
     try:
         target = Path(path) if path is not None else default_path()
         with _store_lock(target):

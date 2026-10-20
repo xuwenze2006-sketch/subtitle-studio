@@ -550,7 +550,7 @@ describe("桌面工作台的真实操作边界", () => {
       await act(async () => { render(<App />); });
       await act(async () => { await vi.advanceTimersByTimeAsync(4500); });
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: '更换素材' })); });
-      expect(screen.getByRole('alert')).toHaveTextContent('本次状态读取失败');
+      expect(screen.getByText(/本次状态读取失败/)).toBeInTheDocument();
       await act(async () => { oldPoll.resolve({ body: { ...original, job: { ...original.job, busy: true, action: 'local', status: 'running', message: '有效的后台进度', total: 10, recognized: 4 } } }); });
       expect(screen.getByText('有效的后台进度')).toBeInTheDocument();
       expect(screen.getByRole('progressbar', { name: '已识别片段' })).toHaveAttribute('value', '4');

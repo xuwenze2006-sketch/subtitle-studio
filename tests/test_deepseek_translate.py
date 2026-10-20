@@ -559,6 +559,51 @@ class DeepSeekTranslationTests(unittest.TestCase):
                     self.translate(['hello'])
                 self.assertEqual(self.ledger.settled[-1], self.ledger.calls[-1]['reserved_cny'])
 
+    def test_usage_total_tokens_must_be_consistent_when_present(self):
+        cases = [
+            ({'prompt_tokens': 100, 'completion_tokens': 40}, 0.00052),
+            ({'prompt_tokens': 100, 'completion_tokens': 40, 'total_tokens': 140}, 0.00052),
+            ({'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}, 0.0),
+            ({'prompt_tokens': 1, 'completion_tokens': 0, 'total_tokens': True}, None),
+            ({'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': False}, None),
+            ({'prompt_tokens': 100, 'completion_tokens': 40, 'total_tokens': '140'}, None),
+            ({'prompt_tokens': 100, 'completion_tokens': 40, 'total_tokens': 140.0}, None),
+            ({'prompt_tokens': 100, 'completion_tokens': 40, 'total_tokens': None}, None),
+            ({'prompt_tokens': 100, 'completion_tokens': 40, 'total_tokens': -1}, None),
+            ({'prompt_tokens': 100, 'completion_tokens': 40, 'total_tokens': 139}, None),
+            ({'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 1000}, None),
+        ]
+        for index, (usage, expected_cost) in enumerate(cases):
+            with self.subTest(usage=usage):
+                self.cache = Path(self.temp.name) / str(index) / 'translations.json'
+                self.ledger = StubLedger(self.cache.parent / 'ledger.json')
+                payload = completion([{'id': 0, 'zh': '译文'}], usage=usage)
+                with self.opener(lambda *_args, **_kwargs: FakeResponse(
+                        json.dumps(payload).encode('utf-8'))):
+                    self.assertEqual(self.translate(['hello']), ['译文'])
+                if expected_cost is None:
+                    self.assertEqual(self.ledger.settled[-1], self.ledger.calls[-1]['reserved_cny'])
+                else:
+                    self.assertAlmostEqual(self.ledger.settled[-1], expected_cost)
+
+    def test_real_budget_ledger_keeps_reservation_for_inconsistent_usage(self):
+        budget = importlib.import_module('subtitle_pipeline.cloud_budget')
+        self.ledger = budget.BudgetLedger(self.cache.parent / 'ledger.json')
+        payload = completion([{'id': 0, 'zh': '译文'}], usage={
+            'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 1000})
+        with self.opener(lambda *_args, **_kwargs: FakeResponse(
+                json.dumps(payload).encode('utf-8'))) as send:
+            self.assertEqual(self.translate(['hello']), ['译文'])
+            self.assertEqual(self.translate(['hello']), ['译文'])
+        self.assertEqual(send.call_count, 1)
+        summary = self.ledger.summary()
+        self.assertAlmostEqual(summary['spent_cny'], 0.037788)
+        self.assertEqual(summary['reserved_cny'], 0)
+        self.assertEqual(len(summary['requests']), 1)
+        record = next(iter(summary['requests'].values()))
+        self.assertEqual(record['cost_source'], 'reservation')
+        self.assertEqual(record['status'], 'success')
+
     def test_preflight_rejects_empty_huge_or_unsafe_total_before_any_request(self):
         cases = [[''], ['  '], ['okay', 'x' * 12000], ['a' * 5000, 'b' * 5000, 'c' * 5000]]
         with self.opener(lambda *_args, **_kwargs: self.fail('invalid input must not be billed')):

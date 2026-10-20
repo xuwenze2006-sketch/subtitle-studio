@@ -20,6 +20,7 @@ import uuid
 import wave
 
 from .atomic_io import cleanup_temporary, replace_with_retry
+from .api_key import is_transport_key
 from .subtitles import Cue
 
 
@@ -279,7 +280,7 @@ def transcribe(audio_path: Path, *, endpoint: str, key: str,
     if destination_raw.is_relative_to(response_root) and destination_raw != canonical_raw:
         raise ValueError("Azure response copy must not replace another shared paid response")
     url = _endpoint_url(endpoint, api_version)
-    if not isinstance(key, str) or not key.strip() or re.search(r"[\x00-\x20\x7f]", key):
+    if not is_transport_key(key):
         raise ValueError("Azure subscription key is missing or invalid")
     if (isinstance(hourly_rate_cny, bool) or not isinstance(hourly_rate_cny, (int, float))
             or not math.isfinite(hourly_rate_cny) or hourly_rate_cny <= 0):

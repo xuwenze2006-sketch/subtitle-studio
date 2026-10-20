@@ -1,4 +1,5 @@
 """Content-bound generation records and non-destructive edit reconciliation."""
+from bisect import bisect_left, bisect_right
 import hashlib
 import json
 from pathlib import Path
@@ -164,19 +165,31 @@ def reconcile_merged_source(project,chunks,state,backup,write,persist):
         if len(baseline)!=len(edited) or any((a.start_ms,a.end_ms)!=(b.start_ms,b.end_ms)
                                            for a,b in zip(baseline,edited)):
             raise HumanEditConflict('合并原文有增删或时间轴修改，请先人工核对；未重新识别或翻译')
-        changes=[(old,new.text) for old,new in zip(baseline,edited) if old.text!=new.text]
+        published=set(baseline)
+        starts=[cue.start_ms for cue in baseline]
+        changes={}
+        for old,new in zip(baseline,edited):
+            if old.text!=new.text:
+                # Keep all edits for an identical published record: different
+                # replacements must still require a human choice below.
+                changes.setdefault(old,set()).add(new.text)
         updates=[]
         for chunk,cues in source_parts:
             revised=[]
             for cue in cues:
                 absolute=Cue(cue.start_ms+chunk.audio_start_ms,cue.end_ms+chunk.audio_start_ms,cue.text)
-                if absolute in baseline:
+                if absolute in published:
                     # Another published cue is a separate utterance, even when
                     # it happens to overlap and repeat the same words.
-                    replacements={text for old,text in changes if absolute==old}
+                    replacements=changes.get(absolute,set())
                 else:
-                    anchors=[old for old in baseline if _boundary_duplicate(absolute,old)]
-                    replacements={text for old,text in changes if old in anchors}
+                    # The duplicate rule requires start times within 1000 ms.
+                    # baseline is sorted; exclude distant cues before comparing
+                    # context copies without changing the exact matching rule.
+                    lower=bisect_left(starts,absolute.start_ms-1000)
+                    upper=bisect_right(starts,absolute.start_ms+1000)
+                    anchors=[old for old in baseline[lower:upper] if _boundary_duplicate(absolute,old)]
+                    replacements={text for old in anchors for text in changes.get(old,())}
                     if replacements and len(anchors)>1:
                         raise HumanEditConflict('接缝上下文对应多个独立句子，请先核对；未自动替换')
                 if len(replacements)>1:
@@ -243,6 +256,13 @@ def _evidence_sha256(path,stop):
 def _evidence_text(path,encoding,stop):
     _check_evidence_stop(stop)
     result=path.read_text(encoding=encoding)
+    _check_evidence_stop(stop)
+    return result
+
+
+def _evidence_bytes(path,stop):
+    _check_evidence_stop(stop)
+    result=path.read_bytes()
     _check_evidence_stop(stop)
     return result
 
@@ -341,7 +361,11 @@ def sample_state_evidence(project,*,provider='qwen_asr',model='qwen-audio-3.1-as
     try:
         project=Path(project).resolve()
         state_path=project/'state.json'
-        state=json.loads(_evidence_text(state_path,'utf-8',stop))
+        # Hash the exact bytes we parse, including original newline encoding.
+        # A later read must never sign a replacement state we did not validate.
+        state_bytes=_evidence_bytes(state_path,stop)
+        state_hash=hashlib.sha256(state_bytes).hexdigest()
+        state=json.loads(state_bytes.decode('utf-8'))
         _check_evidence_stop(stop)
         identity=state['identity']
         invalid=(state.get('status')!='complete' or 'pending_outputs' in state or identity.get('engine')!=provider
@@ -373,8 +397,10 @@ def sample_state_evidence(project,*,provider='qwen_asr',model='qwen-audio-3.1-as
             _check_evidence_stop(stop)
             if not valid:
                 raise ValueError('样片识别/翻译文件或来源证明不完整')
-        state_hash=_evidence_sha256(state_path,stop)
+        current_state_hash=_evidence_sha256(state_path,stop)
         _check_evidence_stop(stop)
+        if current_state_hash!=state_hash:
+            raise ValueError('样片状态在校验过程中改变，请重新读取后重试')
         return {'path':str(state_path),'sha256':state_hash,
                 'source_path':str(source),'source_sha256':source_hash}
     except (OSError,ValueError,KeyError) as error:

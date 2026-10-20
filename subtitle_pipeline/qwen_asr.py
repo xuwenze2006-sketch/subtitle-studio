@@ -23,6 +23,7 @@ import urllib.request
 import wave
 
 from .atomic_io import cleanup_temporary
+from .api_key import is_transport_key
 from .azure_asr import AsrResult, _compact, _copy_raw_response, _milliseconds, _word_cues
 from .cloud_budget import CloudCancelled, CloudRequestError, HttpResponse, _file_lock, _json_object, _write_bytes
 from .subtitles import Cue
@@ -324,7 +325,7 @@ def transcribe(audio_path: Path, *, endpoint: str = 'https://dashscope.aliyuncs.
     if model != _MODEL:
         raise ValueError('本适配器仅支持已核价的 qwen-audio-3.1-asr-flash。')
     url = _endpoint_url(endpoint)
-    if not isinstance(key, str) or not key or re.search(r'[\x00-\x20\x7f]', key):
+    if not is_transport_key(key):
         raise ValueError('Qwen API Key 缺失或格式无效。')
     rates = input_rate_cny_per_million, output_rate_cny_per_million
     if any(isinstance(rate, bool) or not isinstance(rate, (int, float))

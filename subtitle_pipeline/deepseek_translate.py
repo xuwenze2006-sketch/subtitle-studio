@@ -18,6 +18,7 @@ from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .atomic_io import cleanup_temporary, replace_with_retry
+from .api_key import is_transport_key
 from .cloud_budget import CloudCancelled, HttpResponse
 from .integrity import valid_translation_content
 from .translate import TranslationError
@@ -285,6 +286,10 @@ def _actual_cost(payload: dict, input_rate: float, output_rate: float) -> float 
     prompt, completion = usage.get('prompt_tokens'), usage.get('completion_tokens')
     if any(type(value) is not int or value < 0 for value in (prompt, completion)):
         return None
+    if 'total_tokens' in usage:
+        total = usage['total_tokens']
+        if type(total) is not int or total < 0 or total != prompt + completion:
+            return None
     # Charge all input at the cache-miss price, even if a response reports hits.
     return (prompt * input_rate + completion * output_rate) / 1_000_000
 
@@ -337,7 +342,7 @@ def translate_texts(texts: list[str], source: str, target: str, cache_path: Path
                         for index, text in enumerate(context_before)]
     if not texts:
         return []
-    if not isinstance(key, str) or not key.strip() or '\r' in key or '\n' in key:
+    if not is_transport_key(key):
         raise TranslationError('请提供有效的 DeepSeek API Key。')
     rates = (input_rate_cny_per_million, output_rate_cny_per_million)
     if any(isinstance(rate, bool) or not isinstance(rate, (int, float))

@@ -6,6 +6,7 @@ import os
 from urllib.parse import urlsplit
 
 from . import credential_store
+from .api_key import is_transport_key
 
 ENV_NAMES = (
     'QWEN_ASR_ENDPOINT', 'DASHSCOPE_API_KEY', 'DEEPSEEK_API_KEY',
@@ -69,7 +70,7 @@ class SiliconFlowSettings:
 def load_siliconflow_settings(values=None, *, today=None):
     values = read_environment(SILICONFLOW_ENV_NAMES) if values is None else values
     key = values.get('SILICONFLOW_API_KEY', '')
-    if not isinstance(key, str) or not key.strip() or any(char.isspace() or ord(char)<32 or ord(char)==127 for char in key):
+    if not is_transport_key(key):
         raise ConfigurationRequired('请先在本机配置有效的硅基流动 API Key')
     raw_rate = values.get('SILICONFLOW_ASR_CNY_PER_SECOND')
     try:
@@ -124,6 +125,12 @@ def load_settings(environ=None, *, require_deepseek=True, today=None):
         missing.append('DEEPSEEK_API_KEY')
     if missing:
         raise ConfigurationRequired('尚未配置：' + '、'.join(missing))
+    for name in ('DASHSCOPE_API_KEY', 'DEEPSEEK_API_KEY'):
+        value = values.get(name, '')
+        if name == 'DEEPSEEK_API_KEY' and not require_deepseek:
+            continue
+        if not is_transport_key(value):
+            raise ConfigurationRequired(name + ' 格式无效，请检查空白或不支持的字符')
     endpoint = str(values.get('QWEN_ASR_ENDPOINT') or 'https://dashscope.aliyuncs.com/api/v1').strip().rstrip('/')
     parts = urlsplit(endpoint)
     import re

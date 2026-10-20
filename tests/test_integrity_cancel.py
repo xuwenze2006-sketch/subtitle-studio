@@ -88,12 +88,12 @@ class IntegrityCancellationTests(unittest.TestCase):
         verify.assert_not_called()
 
     def test_stop_after_state_read_precedes_json_parsing(self):
-        original=Path.read_text
+        original=Path.read_bytes
         def read(path,*args,**kwargs):
             value=original(path,*args,**kwargs)
             if path==self.state_path:self.stop.set()
             return value
-        with patch.object(Path,'read_text',read),patch.object(i.json,'loads',side_effect=AssertionError('parse after stop')):
+        with patch.object(Path,'read_bytes',read),patch.object(i.json,'loads',side_effect=AssertionError('parse after stop')):
             with self.assertRaises(Cancelled):self.sample(stop=self.stop)
 
     def test_stop_during_model_check_precedes_source_hash(self):
@@ -163,7 +163,7 @@ class IntegrityCancellationTests(unittest.TestCase):
     def test_state_read_io_with_stop_preserves_exact_cause(self):
         failure=OSError('state denied')
         def read(*args,**kwargs):self.stop.set();raise failure
-        with patch.object(Path,'read_text',side_effect=read):
+        with patch.object(Path,'read_bytes',side_effect=read):
             with self.assertRaises(Cancelled) as caught:self.sample(stop=self.stop)
         self.assertIs(caught.exception.__cause__,failure)
 

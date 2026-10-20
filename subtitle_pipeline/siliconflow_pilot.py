@@ -16,6 +16,7 @@ import uuid
 import wave
 
 from .cloud_budget import BudgetLedger, HttpResponse, CloudCancelled, CloudRequestError
+from .api_key import is_transport_key
 from .integrity import sha256, fingerprint
 from .runner import ProjectLock, atomic_json, atomic_text
 from .cloud_workflow import WINDOWS, emit, read_json, verify_source, _stop_files
@@ -99,6 +100,8 @@ def _check_legacy_billing(ledger):
 
 
 def transcribe(audio,key,ledger,stop_event=None,*,price_per_second=None,language='ja'):
+    if not is_transport_key(key):
+        raise ValueError('硅基流动 API Key 缺失或格式无效')
     validate_languages(language,'zh-CN')
     audio=Path(audio)
     seconds=(audio_frames(audio)+15999)//16000
