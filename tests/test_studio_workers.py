@@ -13,7 +13,48 @@ import unittest
 from unittest.mock import patch
 
 
-WORKER = r'''
+WAIT = r'''
+import ctypes
+from ctypes import wintypes
+from pathlib import Path
+import sys
+import time
+
+def hold_fixture(directory, observer_pid, seconds):
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    observer = kernel.OpenProcess(0x100000, False, observer_pid)
+    if not observer:
+        if ctypes.get_last_error() == 87:
+            return
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        def released():
+            status = kernel.WaitForSingleObject(observer, 0)
+            if status not in (0, 258):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return (directory / 'release').exists() or status == 0
+        # The observer owns this wait; its retained process handle prevents
+        # PID reuse, and observer exit releases a fixture even before the ACK.
+        while not (directory / 'handles-held').exists():
+            if released():
+                return
+            time.sleep(.01)
+        deadline = time.monotonic() + seconds
+        while not released() and time.monotonic() < deadline:
+            time.sleep(.01)
+    finally:
+        kernel.CloseHandle(observer)
+'''
+
+NESTED = WAIT + "\nhold_fixture(Path(sys.argv[1]), int(sys.argv[2]), 15)\n"
+
+WORKER = WAIT + r'''
 import json
 import os
 from pathlib import Path
@@ -21,18 +62,16 @@ import subprocess
 import sys
 import time
 from subtitle_pipeline.windows_job import owned_process
-mode, directory = sys.argv[1:]
+mode, directory, observer_pid, nested_code = sys.argv[1:]
 directory = Path(directory)
 def ready(nested_pid=None):
     pending = directory / 'worker.writing'
     pending.write_text(json.dumps({'worker_pid': os.getpid(), 'nested_pid': nested_pid}), encoding='utf-8')
     pending.replace(directory / 'worker.json')
 def hold_until_released():
-    deadline = time.monotonic() + 12
-    while not (directory / 'release').exists() and time.monotonic() < deadline:
-        time.sleep(.01)
+    hold_fixture(directory, int(observer_pid), 12)
 if mode == 'nested':
-    nested = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(15)'],
+    nested = subprocess.Popen([sys.executable, '-c', nested_code, str(directory), observer_pid],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=subprocess.CREATE_NO_WINDOW)
     with owned_process(nested):
@@ -54,7 +93,7 @@ import subprocess
 import sys
 import time
 from subtitle_pipeline import studio
-mode, directory, worker_code = sys.argv[1:]
+mode, directory, worker_code, observer_pid, nested_code = sys.argv[1:]
 directory = Path(directory)
 def forbidden(*args, **kwargs):
     raise AssertionError('Network and credentials are outside this test')
@@ -79,7 +118,8 @@ def observed(child):
         yield owned
 studio.owned_process = observed
 def start(_payload, **_kwargs):
-    return subprocess.Popen([sys.executable, '-X', 'utf8', '-c', worker_code, mode, str(directory)],
+    return subprocess.Popen([sys.executable, '-X', 'utf8', '-c', worker_code, mode, str(directory),
+        observer_pid, nested_code],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW)
 studio.start_process = start
@@ -124,7 +164,7 @@ class StudioWorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='studio-worker-owner-') as directory:
             marker = Path(directory) / 'ready.json'
             parent = subprocess.Popen([sys.executable, '-X', 'utf8', '-c', PARENT,
-                mode, directory, WORKER], cwd=self.root, stdin=subprocess.DEVNULL,
+                mode, directory, WORKER, str(os.getpid()), NESTED], cwd=self.root, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW)
             handles = {}
@@ -153,6 +193,7 @@ class StudioWorkerTests(unittest.TestCase):
                     self.fail('Studio did not bind its worker: ' + error.decode('utf-8'))
                 hold_worker_handles()
                 self.assertEqual(set(handles), {'worker', 'nested'} if mode == 'nested' else {'worker'})
+                (Path(directory) / 'handles-held').touch()
                 for handle in handles.values():
                     self.assertEqual(self.kernel.WaitForSingleObject(handle, 0), 258)
                 parent.kill()

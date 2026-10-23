@@ -36,6 +36,7 @@ from .studio_origin import create_server
 from .runner import PipelineConfig, ProjectLock, atomic_json, engine_paths, pid_alive, run_pipeline, validate_config
 from .subtitles import parse_srt
 from .windows_job import owned_process, wait_for_process_exit
+from .studio_video_download import VideoDownloadError, verified_open
 
 ROOT=Path(__file__).resolve().parents[1]
 PROVIDERS={'siliconflow':'SILICONFLOW_API_KEY','bailian':'DASHSCOPE_API_KEY','deepseek':'DEEPSEEK_API_KEY'}
@@ -1141,29 +1142,59 @@ class StudioController:
         # Hash once per observed file generation, not once per media range.
         # The bounded cache is shared by detached read views; its I/O does not
         # hold the controller lock used for stopping a worker.
-        def stamp(info):
-            return (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
-        lock,cache=self._video_checks
-        key=str(path)
-        with lock:
-            try:
-                with path.open('rb') as stream:
-                    before=stamp(os.fstat(stream.fileno()));path_before=stamp(path.stat())
-                    # On Windows fd and path ctime can represent different
-                    # timestamps. Compare each with its own later observation.
-                    if before[:4]!=path_before[:4]:return False
-                    signature=(digest,before,path_before)
-                    if cache.get(key)==signature:return True
-                    cache.pop(key,None)
-                    actual=hashlib.file_digest(stream,'sha256').hexdigest()
-                    if actual!=digest or stamp(os.fstat(stream.fileno()))!=before or stamp(path.stat())!=path_before:
-                        return False
-                if len(cache)>=8:cache.pop(next(iter(cache)))
-                cache[key]=signature
-                return True
-            except OSError:
-                cache.pop(key,None)
-                return False
+        stream=verified_open(path,digest,self._video_checks)
+        if stream is None:return False
+        stream.close()
+        return True
+
+    def _video_record(self,name):
+        project=self._project_path()
+        manifest=read_json(self._contained_path(project,'campaign.json'))
+        if name=='draft-video' and not manifest:
+            manifest=read_json(self._contained_path(project,Path('导出')/'原文视频'/'export.json'))
+        return manifest
+
+    def _video_result(self,name):
+        from .integrity import fingerprint
+        try:
+            before=self._video_record(name)
+            path=self._draft_video_path() if name=='draft-video' else self._exported_video_path()
+            after=self._video_record(name)
+            if path is None or before!=after:return None
+            prefix='draft_output' if name=='draft-video' else 'output'
+            digest=after.get(prefix+'_sha256');binding=after.get(prefix+'_binding')
+            if not isinstance(binding,dict) or not re.fullmatch(r'[0-9a-f]{64}',str(digest)):return None
+            artifact=fingerprint({'project':self._project_id(),'kind':name,'sha256':digest,'binding':binding})
+            return path,digest,artifact
+        except (OSError,ValueError,RuntimeError,TypeError,KeyError,AttributeError):
+            return None
+
+    def video_download_info(self,name,project_id,artifact_id):
+        """Resolve current proof and pin its verified body before headers."""
+        if (name not in ('video','draft-video') or not isinstance(project_id,str)
+                or not re.fullmatch(r'[0-9a-f]{64}',project_id)
+                or not isinstance(artifact_id,str) or not re.fullmatch(r'[0-9a-f]{64}',artifact_id)):
+            raise VideoDownloadError('下载信息已过期，请刷新当前结果后重新下载。',409)
+        opened=[]
+        def read(view):
+            result=view._video_result(name)
+            if result is None:raise VideoDownloadError('当前成片不可用，请检查文件或重新导出。',410)
+            path,digest,artifact=result
+            if not hmac.compare_digest(artifact,artifact_id):
+                raise VideoDownloadError('成片版本已变化，请刷新当前结果后重新下载。',409)
+            stream=verified_open(path,digest,view._video_checks)
+            if stream is None:raise VideoDownloadError('当前成片不可用，请检查文件或重新导出。',410)
+            opened.append(stream)
+            # Recheck small delivery evidence after opening. An atomic replace
+            # cannot swap the body between verification and response headers.
+            current=view._video_result(name)
+            if current is None:raise VideoDownloadError('当前成片不可用，请检查文件或重新导出。',410)
+            if current!=result:raise VideoDownloadError('成片版本已变化，请刷新当前结果后重新下载。',409)
+            return path,stream,artifact
+        try:return self._read_view(read,project_id)
+        except BaseException:
+            for stream in opened:stream.close()
+            raise
 
     def _draft_video_path(self):
         """Expose only the recorded draft corresponding to current saved cues."""
@@ -1297,15 +1328,19 @@ class StudioController:
                 'selected_id':selected['id'],'offset_ms':selected['offset_ms'],'project_id':identity,
                 'media_url':'/api/media?sample='+selected['id']+'&project='+identity,'exported_video':None,'draft_video':None}
         if not self.campaign:return result
-        exported=self._exported_video_path()
-        if exported:
+        exported_result=self._video_result('video')
+        if exported_result:
+            exported,_,artifact=exported_result
             result['exported_video']={'name':exported.name,'media_url':'/api/output-video?project='+identity,
-                                      'download_url':'/api/download?name=video&project='+identity}
-        draft=self._draft_video_path()
-        if draft:
+                                      'artifact_id':artifact,
+                                      'download_url':'/api/download?name=video&project='+identity+'&artifact='+artifact}
+        draft_result=self._video_result('draft-video')
+        if draft_result:
+            draft,_,artifact=draft_result
             result['draft_video']={'name':draft.name,'review_status':'unreviewed_draft',
                                   'media_url':'/api/draft-video?project='+identity,
-                                  'download_url':'/api/download?name=draft-video&project='+identity}
+                                  'artifact_id':artifact,
+                                  'download_url':'/api/download?name=draft-video&project='+identity+'&artifact='+artifact}
         folder=selected['folder']
         if self._missing_approved_review(folder):
             message='已验收的人工校对记录缺失，请恢复后重新核对；未回退到机器字幕。'
@@ -1559,22 +1594,24 @@ def make_handler(controller,token,host,static_dir):
             self.rfile.end_read()
             return super().end_headers()
 
-        def headers_common(self):
+        def headers_common(self,*,download_error=False):
             self.send_header('Cache-Control','no-store')
             self.send_header('X-Content-Type-Options','nosniff')
             self.send_header('Referrer-Policy','no-referrer')
-            self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+            ancestors="'self'" if download_error else "'none'"
+            self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors "+ancestors+"; base-uri 'none'")
 
         def json_response(self,value,status=200,*,session=False):
             body=json.dumps(value,ensure_ascii=False,allow_nan=False).encode('utf-8')
-            self.send_response(status);self.headers_common()
+            self.send_response(status);self.headers_common(download_error=urlsplit(self.path).path=='/api/download' and status>=400)
             self.send_header('Content-Type','application/json; charset=utf-8')
             self.send_header('Content-Length',str(len(body)))
             if session:self.send_header('Set-Cookie',f'subtitle_session_{host.rsplit(":",1)[-1]}={token}; Path=/; HttpOnly; SameSite=Strict')
-            self.end_headers();self.wfile.write(body)
+            self.end_headers()
+            if getattr(self,'command','GET')!='HEAD':self.wfile.write(body)
 
-        def file_response(self,path,download=False,filename=None):
-            with path.open('rb') as stream:
+        def file_response(self,path,download=False,filename=None,*,opened=None,artifact=None):
+            with opened if opened is not None else path.open('rb') as stream:
                 # Pin one file generation while writers atomically publish
                 # newer subtitles. Headers and body must describe that handle.
                 info=os.fstat(stream.fileno());size=info.st_size
@@ -1591,12 +1628,17 @@ def make_handler(controller,token,host,static_dir):
                 self.send_header('Content-Length',str(end-start+1));self.send_header('Accept-Ranges','bytes')
                 if partial:self.send_header('Content-Range',f'bytes {start}-{end}/{size}')
                 if download:self.send_header('Content-Disposition',"attachment; filename*=UTF-8''"+quote(download_name))
+                if artifact:self.send_header('X-Subtitle-Artifact',artifact)
                 self.end_headers()
+                if getattr(self,'command','GET')=='HEAD':return
                 stream.seek(start);remaining=end-start+1
                 while remaining:
                     block=stream.read(min(1024*256,remaining))
                     if not block:break
                     self.wfile.write(block);remaining-=len(block)
+
+        def do_HEAD(self):
+            self.do_GET()
 
         def do_GET(self):
             parsed=urlsplit(self.path);path=unquote(parsed.path)
@@ -1608,6 +1650,8 @@ def make_handler(controller,token,host,static_dir):
                     query=parse_qs(parsed.query,keep_blank_values=True)
                     sample=query.get('sample',[None])[0]
                     project_id=query.get('project',[None])[0]
+                    if self.command=='HEAD' and path!='/api/download':
+                        return self.json_response({'error':'接口不支持此请求'},405)
                     if path=='/api/state':return self.json_response(controller.state())
                     if path=='/api/progress':return self.json_response(controller.progress())
                     if path=='/api/environment':return self.json_response(controller.environment())
@@ -1623,11 +1667,17 @@ def make_handler(controller,token,host,static_dir):
                         if media is None:raise ValueError('尚无与当前字幕一致的草稿视频')
                         return self.file_response(media)
                     if path=='/api/download':
-                        output,filename=controller.download_info(query.get('name',[''])[0],sample,project_id)
+                        name=query.get('name',[''])[0]
+                        if self.command=='HEAD' or 'artifact' in query:
+                            output,stream,artifact=controller.video_download_info(name,project_id,query.get('artifact',[None])[0])
+                            return self.file_response(output,True,output.name,opened=stream,artifact=artifact)
+                        output,filename=controller.download_info(name,sample,project_id)
                         return self.file_response(output,True,filename)
                     return self.json_response({'error':'接口不存在'},404)
                 except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError,TimeoutError):return
-                except ProjectSelectionChanged as error:return self.json_response({'error':str(error)},400)
+                except VideoDownloadError as error:return self.json_response({'error':str(error)},error.status)
+                except ProjectSelectionChanged as error:
+                    return self.json_response({'error':str(error)},409 if path=='/api/download' and (self.command=='HEAD' or 'artifact' in query) else 400)
                 except (ValueError,OSError,RuntimeError):return self.json_response({'error':'无法读取所选结果，请检查文件是否存在。'},400)
             try:resolved=static_file_path(static_dir,path)
             except (ValueError,OSError):return self.json_response({'error':'页面不存在'},404)

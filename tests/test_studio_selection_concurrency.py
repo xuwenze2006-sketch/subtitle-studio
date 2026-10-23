@@ -126,14 +126,17 @@ class StudioSelectionConcurrencyTests(unittest.TestCase):
                     if aba: result = self.app.select_project({'campaign':str(self.projects['a'])})
                     return result
                 with self.delayed_read() as (entered,release), \
-                        ThreadPoolExecutor(max_workers=1,thread_name_prefix='pending-select') as selectors, \
-                        ThreadPoolExecutor(max_workers=1) as controls:
+                        ThreadPoolExecutor(max_workers=1,thread_name_prefix='pending-select') as selectors:
                     pending = selectors.submit(self.app.select_project,{'campaign':str(self.projects['b'])})
                     try:
-                        self.assertTrue(entered.wait(2)); winner = controls.submit(change)
-                        done,_ = wait((winner,),timeout=.3)
-                        self.assertEqual(len(done),1,'competing selection waited for detached load')
-                        selected = winner.result(); after = self.snapshot(); saved = self.store.read_bytes()
+                        self.assertTrue(entered.wait(2))
+                        # The winner performs real reads and writes. Verify its
+                        # ordering against the held read, not its disk latency.
+                        # A retained live lock exhausts delayed_read's existing
+                        # safety bound and completes pending, so still fails.
+                        selected = change()
+                        self.assertFalse(pending.done(),'competing selection waited for detached load')
+                        after = self.snapshot(); saved = self.store.read_bytes()
                     finally: release.set()
                     with self.assertRaises(studio.ProjectSelectionChanged): pending.result(timeout=3)
                 self.assertEqual(self.snapshot(),after); self.assertEqual(self.store.read_bytes(),saved)

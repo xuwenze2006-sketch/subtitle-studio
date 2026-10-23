@@ -75,6 +75,7 @@ function PreviewSession({
   const [mediaFailed, setMediaFailed] = useState(false);
   const [download, setDownload] = useState("");
   const [downloaded, setDownloaded] = useState("");
+  const [videoDownloadNotice, setVideoDownloadNotice] = useState("");
   const [playing, setPlaying] = useState(false);
   const [recentCue, setRecentCue] = useState(-1);
   const [completedReplay, setCompletedReplay] = useState(null);
@@ -155,6 +156,13 @@ function PreviewSession({
   const restorePosition = useRef(restoredSession?.time ?? null);
   const requestVersion = useRef(0);
   const downloadRequest = useRef(null);
+  const videoDownloadOwner = useRef(null);
+  const cancelVideoDownload = useCallback(() => {
+    const request = videoDownloadOwner.current;
+    videoDownloadOwner.current = null;
+    request?.controller.abort();
+    if (request && downloadRequest.current === request) downloadRequest.current = null;
+  }, []);
   const taskRefreshRequest = useRef(0);
   const replayRange = useRef(null);
   const refreshTaskState = useCallback(async (savedMessage) => {
@@ -171,10 +179,12 @@ function PreviewSession({
   useLayoutEffect(() => () => {
     video.current?.pause();
     requestVersion.current += 1;
+    cancelVideoDownload();
     downloadRequest.current = null;
-  }, []);
+  }, [cancelVideoDownload]);
   useEffect(() => {
     const version = ++requestVersion.current;
+    cancelVideoDownload();
     downloadRequest.current = null;
     const controller = new AbortController();
     video.current?.pause();
@@ -183,6 +193,7 @@ function PreviewSession({
     setTime(restorePosition.current ?? 0);
     setDownload("");
     setDownloaded("");
+    setVideoDownloadNotice("");
     setPlaying(false);
     setRecentCue(-1);
     setCompletedReplay(null);
@@ -225,6 +236,7 @@ function PreviewSession({
       });
     return () => {
       controller.abort();
+      cancelVideoDownload();
     };
   }, [
     api,
@@ -237,6 +249,7 @@ function PreviewSession({
     selection,
     onError,
     restoreReviewDraft,
+    cancelVideoDownload,
   ]);
   const cueViews=useRef(new WeakMap()), searchEntries=useRef(new WeakMap());
   const cues = useMemo(() => (preview?.cues || []).map(cue=>{
@@ -264,6 +277,21 @@ function PreviewSession({
     ? "草稿对应的原句已不存在，内容已保留，请复制需要的内容或放弃草稿"
     : activeReviewDraft.revision !== preview.manual_review.revision
       ? "草稿基准版本已变化，输入已保留" : "";
+  // A download belongs to the exact preview that supplied its artifact proof.
+  // Its delayed browser response must never report into a newer editor state.
+  useLayoutEffect(() => () => cancelVideoDownload(), [preview, cancelVideoDownload]);
+  useEffect(() => {
+    setVideoDownloadNotice("");
+    setDownload(current => current === "draft-video" || current === "video" ? "" : current);
+  }, [preview]);
+  useLayoutEffect(() => {
+    if (!videoDownloadOwner.current || !(reviewDirty || reviewBusy || reviewPending || savingVersion ||
+        recoveryDraft || reviewConflict || draftConflict || preview?.manual_review?.conflict || disabled)) return;
+    cancelVideoDownload();
+    setDownload(current => current === "draft-video" || current === "video" ? "" : current);
+    setVideoDownloadNotice("");
+  }, [reviewDirty, reviewBusy, reviewPending, savingVersion, recoveryDraft, reviewConflict, draftConflict,
+    preview?.manual_review?.conflict, disabled, cancelVideoDownload]);
   useLayoutEffect(() => {
     if (sessionMemory) sessionMemory.current = { projectKey, selection: preview?.selected_id || selection, time, query, rate, followPlayback, timelineMemory, reviewDraft, reviewFilter };
   }, [sessionMemory, projectKey, preview?.selected_id, selection, time, query, rate, followPlayback, timelineMemory, reviewDraft, reviewFilter]);
@@ -390,6 +418,7 @@ function PreviewSession({
   const switchSelection = (value) => {
     if (reviewDirty) { setReviewNotice("有未保存修改，请先保存或放弃后再切换片段。"); return; }
     ++requestVersion.current;
+    cancelVideoDownload();
     downloadRequest.current = null;
     video.current?.pause();
     replayRange.current = null;
@@ -399,6 +428,7 @@ function PreviewSession({
     setRecentCue(-1);
     setCompletedReplay(null);
     setDownloaded("");
+    setVideoDownloadNotice("");
     setReviewDraft(null);
     setReviewFilter("all");
     setReviewBusy(false);
@@ -512,11 +542,13 @@ function PreviewSession({
   const save = async (name) => {
     if (reviewDirty || reviewBusy || reviewSubmissions.pending(selectedId)) { setReviewNotice("请先保存本句修改，并等待保存完成后再导出字幕。"); return; }
     if (disabled || loading || downloadRequest.current || subtitleVersions.pending(selectedId) || !preview) return;
+    cancelVideoDownload();
     // Review acknowledgements invalidate stale preview reads, not this export.
     const request = {};
     downloadRequest.current = request;
     setDownload(name);
     setDownloaded("");
+    setVideoDownloadNotice("");
     try {
       const filename = await api.download(name, selectedId, preview?.project_id);
       if (downloadRequest.current === request) setDownloaded(filename || name);
@@ -576,6 +608,9 @@ function PreviewSession({
   };
   const refreshReview = async ({ preserveNotice = false } = {}) => {
     if (!preview || reviewBusy || disabled || loading || snapshot?.job?.busy) return;
+    cancelVideoDownload();
+    setDownload(current => current === "draft-video" || current === "video" ? "" : current);
+    setVideoDownloadNotice("");
     const version = requestVersion.current;
     ++taskRefreshRequest.current;
     setReviewBusy(true);
@@ -667,10 +702,44 @@ function PreviewSession({
     if (canPlay) seek(entry.cue);
   };
   const canExportDraft = !!preview && connection === "connected" && !disabled && !loading &&
-    !snapshot?.job?.busy && !!snapshot?.actions?.["export-draft"] && !!run &&
+    !snapshot?.job?.busy && !download && !!snapshot?.actions?.["export-draft"] && !!run &&
     !reviewDirty && !reviewBusy && !reviewPending && !savingVersion && !recoveryDraft &&
     !reviewConflict && !draftConflict && !preview.manual_review?.conflict &&
     (!sourceOnly || sourceExportSupported);
+  const videoDownloadReady = !!preview?.project_id && preview.project_id === snapshot?.project_id &&
+    connection === "connected" && !disabled && !loading && !snapshot?.job?.busy && !download &&
+    !reviewDirty && !reviewBusy && !reviewPending && !savingVersion && !recoveryDraft &&
+    !reviewConflict && !draftConflict && !preview.manual_review?.conflict;
+  const canDownloadVideo = descriptor => videoDownloadReady && !!descriptor?.name && !!descriptor.artifact_id;
+  const downloadVideo = async (kind, descriptor) => {
+    if (!canDownloadVideo(descriptor) || downloadRequest.current || hasPendingReviewSubmissions(submissionOwner) ||
+        subtitleVersions.pending(selectedId)) return;
+    cancelVideoDownload();
+    const request = { controller: new AbortController(), version: requestVersion.current };
+    videoDownloadOwner.current = request;
+    downloadRequest.current = request;
+    setDownload(kind);
+    setDownloaded("");
+    setVideoDownloadNotice("");
+    const current = () => videoDownloadOwner.current === request && !request.controller.signal.aborted &&
+      request.version === requestVersion.current;
+    const reportError = error => {
+      if (!current()) return;
+      setVideoDownloadNotice("");
+      onError(error.message);
+    };
+    try {
+      await api.downloadVideo(kind, preview.project_id, descriptor, { signal: request.controller.signal, onError: reportError });
+      if (current()) setVideoDownloadNotice("已交给浏览器下载，请在浏览器下载列表中查看进度。");
+    } catch (error) {
+      reportError(error);
+    } finally {
+      if (downloadRequest.current === request) {
+        downloadRequest.current = null;
+        setDownload("");
+      }
+    }
+  };
   const exportDraft = event => {
     if (event.detail > 1 || !canExportDraft || hasPendingReviewSubmissions(submissionOwner) || subtitleVersions.pending(selectedId)) return;
     run("export-draft");
@@ -687,6 +756,8 @@ function PreviewSession({
       </div>
       <div className="preview-export-actions">
         {preview?.draft_video && <>
+          <Button icon={Download} disabled={!canDownloadVideo(preview.draft_video)} busy={download === "draft-video"}
+            onClick={() => void downloadVideo("draft-video", preview.draft_video)}>下载草稿 MP4</Button>
           <Button icon={Play} disabled={disabled} onClick={() => open("draft-video", preview.project_id)}>播放草稿</Button>
           <Button icon={FolderOpen} disabled={disabled} onClick={() => open("draft-video-folder", preview.project_id)}>打开草稿目录</Button>
         </>}
@@ -725,6 +796,7 @@ function PreviewSession({
           {compact && toReview && <Button icon={ListChecks} variant="primary" disabled={disabled} onClick={toReview}>进入校对台</Button>}
         </div>
       </div>
+      {videoDownloadNotice && <p className="preview-download-receipt" role="status">{videoDownloadNotice}</p>}
       {loading && <p className="preview-loading" role="status">正在读取所选片段…</p>}
       <div className="preview-layout">
         <section className="card player-card">
@@ -916,10 +988,12 @@ function PreviewSession({
         </div>
         <div className="preview-export-actions">
           {preview?.exported_video ? <>
+            <Button icon={Download} disabled={!canDownloadVideo(preview.exported_video)} busy={download === "video"}
+              onClick={() => void downloadVideo("video", preview.exported_video)}>下载审核版 MP4</Button>
             <Button icon={Play} disabled={disabled} onClick={() => open("video", preview.project_id)}>播放成片</Button>
             <Button icon={FolderOpen} disabled={disabled} onClick={() => open("video-folder", preview.project_id)}>打开成片目录</Button>
           </> : !snapshot?.actions?.export && toWorkspace ? <Button icon={ListChecks} onClick={toWorkspace}>返回任务完成审核</Button> : null}
-          <Button icon={Clapperboard} variant="primary" disabled={disabled || !!snapshot?.job?.busy || !snapshot?.actions?.export || !run} busy={snapshot?.job?.busy && snapshot?.job?.action === "export"} onClick={() => run("export")}>导出带字幕 MP4</Button>
+          <Button icon={Clapperboard} variant="primary" disabled={disabled || !!download || !!snapshot?.job?.busy || !snapshot?.actions?.export || !run} busy={snapshot?.job?.busy && snapshot?.job?.action === "export"} onClick={() => run("export")}>导出带字幕 MP4</Button>
         </div>
       </section>}
       {!!preview?.issues?.length && (
