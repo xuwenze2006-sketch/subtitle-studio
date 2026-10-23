@@ -122,20 +122,26 @@ class DeadlineTests(unittest.TestCase):
                 if mode == 'tls':
                     url = url.replace('http:', 'https:')
                 stop = threading.Event()
+                cancelled_at = []
                 def cancel():
                     if ready.wait(3):
+                        cancelled_at.append(time.monotonic())
                         stop.set()
                 watcher = threading.Thread(target=cancel)
                 watcher.start()
                 try:
-                    started = time.monotonic()
-                    with self.assertRaises(tr.TranslationCancelled):
+                    with self.assertRaises(tr.TranslationCancelled) as raised:
                         tr._request_json(url, stop_event=stop)
+                    returned = time.monotonic()
                     self.assertTrue(ready.is_set())
-                    self.assertLess(time.monotonic() - started, 2)
+                    self.assertEqual(len(cancelled_at), 1, 'must issue cancellation after I/O is ready')
+                    self.assertFalse(getattr(raised.exception.__cause__, '__notes__', ()))
+                    self.assert_reaped()
+                    # Fixture startup precedes the user's stop request. The
+                    # response budget includes cancellation and native reap.
+                    self.assertLess(returned - cancelled_at[0], 2)
                 finally:
                     watcher.join(timeout=4)
-        self.assert_reaped()
 
     def test_cancel_also_covers_blocked_dns_and_connect(self):
         original = local_process.capture_process
@@ -143,6 +149,7 @@ class DeadlineTests(unittest.TestCase):
             with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
                 ready = Path(directory) / 'started'
                 stop = threading.Event()
+                cancelled_at = []
                 target = 'socket.getaddrinfo' if stage == 'getaddrinfo' else 'socket.socket.connect'
                 program = ("import runpy,socket,time; from pathlib import Path\n"
                            f"def stall(*a,**k):\n Path({str(ready)!r}).write_text('ready'); time.sleep(10)\n"
@@ -154,19 +161,54 @@ class DeadlineTests(unittest.TestCase):
                     deadline = time.monotonic() + 3
                     while not ready.exists() and time.monotonic() < deadline:
                         time.sleep(0.01)
+                    if ready.exists():
+                        cancelled_at.append(time.monotonic())
                     stop.set()
                 watcher = threading.Thread(target=cancel)
                 watcher.start()
                 try:
-                    started = time.monotonic()
                     with patch.object(local_process, 'capture_process', side_effect=capture):
-                        with self.assertRaises(tr.TranslationCancelled):
+                        with self.assertRaises(tr.TranslationCancelled) as raised:
                             tr._request_json('http://127.0.0.1:9/', stop_event=stop)
+                    returned = time.monotonic()
                     self.assertTrue(ready.exists())
-                    self.assertLess(time.monotonic() - started, 2)
+                    self.assertEqual(len(cancelled_at), 1, 'must issue cancellation in the selected phase')
+                    self.assertFalse(getattr(raised.exception.__cause__, '__notes__', ()))
+                    self.assert_reaped()
+                    self.assertLess(returned - cancelled_at[0], 2)
                 finally:
                     watcher.join(timeout=4)
-        self.assert_reaped()
+
+    def test_cancel_during_slow_worker_startup(self):
+        original = local_process.capture_process
+        with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory) / 'startup'
+            program = ("import time; from pathlib import Path\n"
+                       f"Path({str(ready)!r}).write_text('starting'); time.sleep(10)")
+            def capture(args, **kwargs):
+                return original([sys.executable, '-X', 'utf8', '-c', program], **kwargs)
+            stop, cancelled_at = threading.Event(), []
+            def cancel():
+                deadline = time.monotonic() + 3
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                if ready.exists():
+                    cancelled_at.append(time.monotonic())
+                stop.set()
+            watcher = threading.Thread(target=cancel)
+            watcher.start()
+            try:
+                with patch.object(local_process, 'capture_process', side_effect=capture):
+                    with self.assertRaises(tr.TranslationCancelled) as raised:
+                        tr._request_json('http://127.0.0.1:9/', stop_event=stop)
+                returned = time.monotonic()
+                self.assertTrue(ready.exists(), 'must cancel a real child during startup')
+                self.assertEqual(len(cancelled_at), 1)
+                self.assertFalse(getattr(raised.exception.__cause__, '__notes__', ()))
+                self.assert_reaped()
+                self.assertLess(returned - cancelled_at[0], 2)
+            finally:
+                watcher.join(timeout=4)
 
     def test_deadline_also_covers_blocked_dns_and_connect(self):
         original = local_process.capture_process
