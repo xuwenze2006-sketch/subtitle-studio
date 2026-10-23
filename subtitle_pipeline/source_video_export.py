@@ -85,7 +85,7 @@ def _ownership(project, source, source_hash):
     return path, record, expected
 
 
-def _inputs(project, source=None):
+def _inputs(project, source=None, *, delivery=True):
     """Only fixed small files; no media probe, hash scan, lock, or writes."""
     project = _plain(project)
     if not project.is_dir() or _path(project, 'campaign.json').exists():
@@ -127,6 +127,8 @@ def _inputs(project, source=None):
         or top['draft_output_binding'].get('manual_revision') is not None)
     if not view['exists'] and (owner is not None and owner['manual_record_seen'] or previous_manual):
         raise ValueError('原人工校对记录缺失，不能回退机器字幕导出原文视频')
+    if not delivery:
+        return project, configured, state, view, None
     snapshot = _path(project, '人工校对', '版本', view['revision'])
     captions = render_srt([Cue(cue['start_ms'], cue['end_ms'], cue['source_text'])
                            for cue in view['cues']]).encode('utf-8')
@@ -144,7 +146,7 @@ def _inputs(project, source=None):
 def source_export_available(project, source):
     """Read-only capability; full source and chunk evidence are checked at export."""
     try:
-        _inputs(project, source)
+        _inputs(project, source, delivery=False)
         return True
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
         return False
@@ -219,7 +221,7 @@ def _stored_source_info(binding):
 def current_source_video(project, source, *, video_matches):
     """Expose only an owned output bound to the current saved delivery input."""
     try:
-        project, source, state, view, binding = _inputs(project, source)
+        project = _plain(project)
         record, _ = _json(_path(_export_root(project), 'export.json'), optional=True)
         if (record is None or type(record.get('version')) is not int or record['version'] != 1
                 or record.get('mode') != 'source_only' or record.get('status') != 'draft_exported'):
@@ -227,6 +229,7 @@ def current_source_video(project, source, *, video_matches):
         requested = record.get('requested_encoder')
         if requested not in ('auto', 'qsv', 'cpu'):
             return None
+        project, source, state, view, binding = _inputs(project, source)
         key, _, folder, final = _locations(project, source, binding, requested)
         _validate_work_paths(folder, final)
         saved = record.get('draft_output_binding')
