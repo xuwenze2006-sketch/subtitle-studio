@@ -39,6 +39,13 @@ class ExportDependencies:
     emit: Callable
 
 
+@dataclass(frozen=True)
+class RenderDependencies:
+    """Only record ownership and progress cross the qualified-input boundary."""
+    write_manifest: Callable
+    emit: Callable
+
+
 def read_json(path):
     return json.loads(Path(path).read_text(encoding='utf-8-sig'))
 
@@ -504,19 +511,46 @@ def _export_video(campaign,stop,*,draft,encoder,dependencies):
                  'render_version':1}
         if (language,target)!=('ja','zh-CN'):
             binding.update(language=language,target=target)
+    return render_video(campaign,manifest,source,captions,binding,stop,
+        folder=campaign/'导出'/'草稿视频' if draft else campaign/'导出',
+        final=video_output_path(source,target,draft=draft),draft=draft,
+        encoder=encoder,dependencies=dependencies,progress=progress)
+
+
+def render_video(campaign,manifest,source,captions,binding,stop,*,folder,final,
+                 draft,encoder,dependencies,progress=None,validate_inputs=None,
+                 review_label=None,edition=None):
+    """Render qualified immutable captions, retaining exact legacy checkpoints.
+
+    Callers own their project locks and input qualification. New input modes
+    may additionally pin their current state immediately before publication.
+    """
+    emit=dependencies.emit
+    if progress is None:
+        progress=ExportProgress(manifest.get('duration_ms',0)/1000,emit)
+        progress.stage('preparing')
     _check_export_stop(stop)
     info=media_info(source,stop)
+    if validate_inputs is not None:
+        # This check applies to newly qualified local input modes only; old
+        # cloud argument/binding/media behavior remains unchanged.
+        videos=[stream for stream in info.get('streams',[]) if stream.get('codec_type')=='video'
+                and not stream.get('disposition',{}).get('attached_pic')]
+        if not videos or next((s for s in info['streams'] if s.get('codec_type')=='video'),None) is not videos[0]:
+            raise ValueError('原文 MP4 导出需要可播放的视频流，音频或封面图不能压制为视频')
+        _validate_video_parameters(info,info)
+        if abs(float(info['format']['duration']) - manifest['duration_ms']/1000) > .1:
+            raise ValueError('源视频时长与本地原文项目不一致')
+        audio_track_descriptors(info)
     multiple_audio=len([stream for stream in info['streams'] if stream.get('codec_type')=='audio'])>1
     if multiple_audio:
         # Bind the changed mapping before any existing final is considered.
         # Keep legacy one-track bindings/arguments so completed user encodes
         # do not need to be repeated solely because this policy was added.
         binding.update(audio_policy='all_tracks_v1',audio_tracks=audio_track_descriptors(info))
-    edition='未审核草稿' if draft else '修订版'
+    edition=edition or ('未审核草稿' if draft else '修订版')
     status='draft_exported' if draft else 'exported'
     output_key='draft_output' if draft else 'output'
-    final=video_output_path(source,target,draft=draft)
-    folder=campaign/'导出'/'草稿视频' if draft else campaign/'导出'
     published=final.exists()
     output_hash=_stable_final_hash(final,stop) if published else None
     resume_encoder=_resume_encoder(folder,manifest,output_key,binding,encoder,published=published,
@@ -530,8 +564,11 @@ def _export_video(campaign,stop,*,draft,encoder,dependencies):
     _check_export_stop(stop)
     binding['encoder']=selected_encoder
     emit('已选择视频编码方式：'+('QSV' if selected_encoder=='qsv' else 'CPU (libx264)'),encoder=selected_encoder)
+    if validate_inputs is not None:validate_inputs()
     if published:
         verification=_publication_evidence(folder,binding,output_hash,info)
+        if validate_inputs is not None and verification is None:
+            raise ValueError('已存在原文成片缺少完整媒体发布证明，未覆盖或认领')
         if (manifest.get(output_key+'_sha256')==output_hash and _binding_matches(manifest.get(output_key+'_binding'),binding)
                 and (not multiple_audio or verification is not None)):
             if verification and not (folder/'verification.json').exists():
@@ -542,6 +579,9 @@ def _export_video(campaign,stop,*,draft,encoder,dependencies):
                     _check_export_stop(stop,error)
                     raise
             _check_export_stop(stop)
+            if validate_inputs is not None:
+                dependencies.write_manifest(campaign,manifest)
+                _check_export_stop(stop)
             progress.stage('done')
             emit(edition+'已存在且校验一致，无需重复压制',status=status,output=str(final));return
         if verification:
@@ -621,7 +661,7 @@ def _export_video(campaign,stop,*,draft,encoder,dependencies):
             'output_audio_sha256':output_audio,'output_binding':binding,
             'video_fields':{k:out.get(k) for k in ('width','height','r_frame_rate','nb_frames')},
             'duration':result['format']['duration'],
-            'review':'未人工审核，仅完成自动媒体完整性检查' if draft else '用户抽检通过，未声称逐句人工校对'}
+            'review':review_label or ('未人工审核，仅完成自动媒体完整性检查' if draft else '用户抽检通过，未声称逐句人工校对')}
         if audio_tracks is not None:verification['audio_tracks']=audio_tracks
     else:
         emit('已核验源视频与编码文件，复用相同成片的媒体检查记录，继续保存')
@@ -630,7 +670,9 @@ def _export_video(campaign,stop,*,draft,encoder,dependencies):
     r.atomic_json(folder/'publication-checkpoint.json',{'version':1,'output_binding':binding,
                   'sha256':encoded_hash,'verification':verification})
     progress.stage('publishing')
+    if validate_inputs is not None:validate_inputs()
     output_hash=_publish_video(partial,final,stop,expected_hash=encoded_hash,emit=emit)
+    if validate_inputs is not None:validate_inputs()
     _record_export(campaign,manifest,folder,final,output_key,output_hash,binding,draft,verification,stop=stop,dependencies=dependencies)
     _check_export_stop(stop)
     progress.stage('done')

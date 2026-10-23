@@ -105,6 +105,7 @@ function PreviewSession({
   const reviewBusy = reviewActionBusy || reviewSubmissions.pending(selectedId);
   const reviewPending = hasPendingReviewSubmissions(submissionOwner);
   const sourceOnly = preview?.manual_review?.mode === "source_only";
+  const sourceExportSupported = sourceOnly && preview?.source_export_supported === true;
   const sourceOnlyDraftConflict = hasSourceOnlyDraftConflict(preview, reviewDraft);
   const reviewDirty = isReviewDirty(reviewDraft) || sourceOnlyDraftConflict;
   useLayoutEffect(() => {
@@ -665,11 +666,23 @@ function PreviewSession({
     setLocateRequest({ index: entry.index });
     if (canPlay) seek(entry.cue);
   };
-  const draftExport = !sourceOnly && (snapshot?.actions?.["export-draft"] !== undefined || preview?.draft_video || snapshot?.job?.action === "export-draft") &&
+  const canExportDraft = !!preview && connection === "connected" && !disabled && !loading &&
+    !snapshot?.job?.busy && !!snapshot?.actions?.["export-draft"] && !!run &&
+    !reviewDirty && !reviewBusy && !reviewPending && !savingVersion && !recoveryDraft &&
+    !reviewConflict && !draftConflict && !preview.manual_review?.conflict &&
+    (!sourceOnly || sourceExportSupported);
+  const exportDraft = event => {
+    if (event.detail > 1 || !canExportDraft || hasPendingReviewSubmissions(submissionOwner) || subtitleVersions.pending(selectedId)) return;
+    run("export-draft");
+  };
+  const draftExport = !!preview && (!sourceOnly || sourceExportSupported) &&
+    (snapshot?.actions?.["export-draft"] !== undefined || preview?.draft_video || snapshot?.job?.action === "export-draft" || sourceExportSupported) &&
     <section className="card preview-export-card preview-draft-export-card" aria-label="草稿成片导出">
       <div>
-        <h2><Clapperboard size={18} /> 草稿 MP4 <Badge tone="warning">未审核草稿</Badge></h2>
-        <p>可直接导出当前字幕；未经人工审核，原视频保留。</p>
+        <h2><Clapperboard size={18} /> {sourceOnly ? "原文草稿 MP4" : "草稿 MP4"} <Badge tone="warning">未审核草稿</Badge></h2>
+        <p>{sourceOnly ? "导出当前已保存的原文字幕；未经人工审核，原视频保留。" : "可直接导出当前字幕；未经人工审核，原视频保留。"}</p>
+        {(reviewDirty || reviewBusy || reviewPending || savingVersion || recoveryDraft || reviewConflict || draftConflict || preview.manual_review?.conflict) &&
+          <p>请先保存本句修改、处理草稿或版本冲突，并等待保存完成后再导出。</p>}
         {preview?.draft_video && <p>{preview.draft_video.name}</p>}
       </div>
       <div className="preview-export-actions">
@@ -677,8 +690,8 @@ function PreviewSession({
           <Button icon={Play} disabled={disabled} onClick={() => open("draft-video", preview.project_id)}>播放草稿</Button>
           <Button icon={FolderOpen} disabled={disabled} onClick={() => open("draft-video-folder", preview.project_id)}>打开草稿目录</Button>
         </>}
-        <Button icon={Clapperboard} variant="primary" disabled={disabled || loading || !!snapshot?.job?.busy || !snapshot?.actions?.["export-draft"] || !run}
-          busy={snapshot?.job?.busy && snapshot?.job?.action === "export-draft"} onClick={() => run("export-draft")}>直接导出草稿 MP4</Button>
+        <Button icon={Clapperboard} variant="primary" disabled={!canExportDraft}
+          busy={snapshot?.job?.busy && snapshot?.job?.action === "export-draft"} onClick={exportDraft}>直接导出草稿 MP4</Button>
       </div>
     </section>;
 
@@ -944,7 +957,9 @@ function PreviewSession({
           </div>
         </section>
       )}
-      {!compact && sourceOnly && <p className="preview-review-note">逐句核对并保存后，可下载原文字幕或保存字幕版本。</p>}
+      {!compact && sourceOnly && <p className="preview-review-note">{sourceExportSupported
+        ? "逐句核对并保存后，可下载原文字幕、保存字幕版本或导出未审核原文 MP4。"
+        : "逐句核对并保存后，可下载原文字幕或保存字幕版本。"}</p>}
       {!compact && !sourceOnly && <div className="preview-review-note">
         <ListChecks size={19} />
         <div>

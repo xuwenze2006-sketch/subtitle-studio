@@ -507,6 +507,8 @@ class StudioController:
                     siliconflow_ready=accounts['siliconflow']['ready'],
                     siliconflow_result_exists=result['siliconflow_result_exists'])
                 actions['local']=not job['busy'] and view._local_action_allowed
+                if view._source_export_allowed:
+                    actions['export-draft']=not job['busy']
             result.update(job=job,actions=actions)
         result['persistence_warning']=self.persistence_warning
         return result
@@ -577,6 +579,12 @@ class StudioController:
             siliconflow_ready=accounts['siliconflow']['ready'],siliconflow_result_exists=sf_result)
         self._local_action_allowed=local and not self._is_cloud_project(previous)
         actions['local']=not job['busy'] and self._local_action_allowed
+        self._source_export_allowed=False
+        if self.campaign and self.source and not manifest:
+            from .source_video_export import source_export_available
+            self._source_export_allowed=source_export_available(self._project_path(),Path(self.source))
+            if self._source_export_allowed:
+                actions['export-draft']=not job['busy']
         project_config={k:config[k] for k in ('language','target','chunk_seconds','workers','threads','translate','asr_provider') if k in config}
         if manifest:
             language,target=manifest_languages(manifest)
@@ -839,7 +847,8 @@ class StudioController:
             raise ValueError('当前步骤尚未满足条件，请先配置账户或完成前一步审核')
         project=self._project_path()
         if action in ('local','prepare','samples') and not Path(self.source).is_file():raise ValueError('请选择存在的视频或音频文件')
-        values=account_environment()
+        source_export=action=='export-draft' and self._source_export_allowed
+        values={} if source_export else account_environment()
         redactions=[values.get(name,'') for name in PROVIDERS.values()]
         if action=='local':
             old=read_json(project/'state.json')
@@ -856,6 +865,12 @@ class StudioController:
                     raise ValueError('分段时长无效')
             validate_config(config)
             payload=config
+        elif source_export:
+            encoder=data.get('encoder','auto')
+            if not isinstance(encoder,str) or encoder not in ('auto','qsv','cpu'):
+                raise ValueError('视频编码方式无效')
+            payload=[sys.executable,'-m','subtitle_pipeline.source_video_export',
+                     '--project',str(project),'--encoder',encoder]
         else:
             payload=build_command(action,campaign=project,source=self.source,baseline=self.baseline,
                 **({'language':data.get('language',state['project_config'].get('language','ja')),
@@ -1154,6 +1169,9 @@ class StudioController:
         """Expose only the recorded draft corresponding to current saved cues."""
         if not self.campaign or not self.source:return None
         manifest=read_json(self._contained_path(self._project_path(),'campaign.json'))
+        if not manifest:
+            from .source_video_export import current_source_video
+            return current_source_video(self._project_path(),Path(self.source),video_matches=self._video_matches)
         recorded=manifest.get('draft_output');binding=manifest.get('draft_output_binding')
         if (not isinstance(recorded,str) or not isinstance(binding,dict)
             or binding.get('render_version')!=1 or binding.get('review_status')!='unreviewed_draft'
@@ -1320,6 +1338,9 @@ class StudioController:
                 result['manual_review']={'supported':True,'revision':review['revision'],'summary':review['summary'],
                                          **self._review_mode_fields(review)}
                 result['cues']=[{**cue,'ja':cue['source_text'],'zh':cue['target_text']} for cue in review['cues']]
+                if review.get('mode')=='source_only':
+                    from .source_video_export import source_export_available
+                    result['source_export_supported']=selected['id']=='main' and source_export_available(self._project_path(),Path(self.source))
             except (ValueError,OSError,RuntimeError) as error:
                 result['manual_review']={'supported':True,'conflict':str(error)}
                 result['issues'].append('人工校对记录需要处理：'+str(error))
@@ -1448,12 +1469,16 @@ class StudioController:
                             language=language,target=target)
             if mode=='cue':
                 cue=review['cues'][data['cue_id']-1]
+                capability={}
+                if review.get('mode')=='source_only':
+                    from .source_video_export import source_export_available
+                    capability['source_export_supported']=selected['id']=='main' and source_export_available(project,Path(self.source))
                 return {'kind':'review-cue','project_id':self._project_id(),'selected_id':selected['id'],
                         'base_revision':data['expected_revision'],
                         'cue':{**cue,'ja':cue['source_text'],'zh':cue['target_text']},
                         'manual_review':{'supported':True,'revision':review['revision'],'summary':review['summary'],
                                          **self._review_mode_fields(review)},
-                        'exported_video':None,'draft_video':None}
+                        'exported_video':None,'draft_video':None,**capability}
             return self._preview_data(selected['id'])
 
     def review_accept(self,data):

@@ -14,5 +14,6 @@ export function applyReviewReceipt(preview, receipt, submission) {
     throw new Error('修改已保存，当前字幕版本已变化，请刷新核对状态。');
   }
   return {...preview, cues:preview.cues.map(cue=>cue.id===submission.cueId ? receipt.cue : cue),
+    ...(receipt.manual_review.mode === 'source_only' ? {source_export_supported:receipt.source_export_supported === true} : {}),
     manual_review:receipt.manual_review, exported_video:null, draft_video:null};
 }
