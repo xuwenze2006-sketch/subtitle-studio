@@ -82,6 +82,30 @@ class StudioStopConcurrencyTests(unittest.TestCase):
         self.assertEqual(len(done), 1, message)
         return future.result(timeout=2)
 
+    def finish_while_marker_pending(self, pool, message):
+        # Finishing releases the live lock before draining the summary to disk.
+        # Observe that boundary and responsiveness, not disk latency, while the
+        # stop marker writer remains blocked. The caller still joins the real
+        # final save after releasing the marker.
+        entered = threading.Event()
+        drain = self.app._drain_persistence
+        def observed_drain():
+            entered.set()
+            return drain()
+        with patch.object(self.app, '_drain_persistence', side_effect=observed_drain):
+            finished = pool.submit(self.app._finish_job)
+            self.assertTrue(entered.wait(.3), message)
+            # Stop writers and a deliberately slow save may occupy every slot
+            # in the scenario pool. Probe the live lock on a separate thread.
+            controls = ThreadPoolExecutor(max_workers=1)
+            try:
+                self.assertTrue(self.assert_ready(
+                    controls.submit(self.app.touch, SimpleNamespace(last_touch=0.0)), message))
+            finally:
+                controls.shutdown(wait=False)
+            self.assertFalse(self.app.job['busy'])
+        return finished
+
     def start_new_cloud_run(self):
         def child_wait():
             self.worker_waiting.set()
@@ -125,12 +149,13 @@ class StudioStopConcurrencyTests(unittest.TestCase):
             pending = pool.submit(self.app.stop)
             try:
                 self.assertTrue(entered.wait(2))
-                self.assert_ready(pool.submit(self.app._finish_job), 'finished job waited for old stop I/O')
+                finished = self.finish_while_marker_pending(pool, 'finished job waited for old stop I/O')
                 self.start_new_cloud_run()
                 new_job, new_event, new_marker = self.app.job, self.app.stop_event, self.app._cancel_marker
                 before = deepcopy(new_job)
                 release.set()
                 self.assertEqual(pending.result(timeout=2), {'stopping': True})
+                finished.result(timeout=2)
                 self.assertIs(self.app.job, new_job)
                 self.assertEqual(new_job, before)
                 self.assertFalse(new_event.is_set())
@@ -146,7 +171,7 @@ class StudioStopConcurrencyTests(unittest.TestCase):
             pending = pool.submit(self.app.stop)
             try:
                 self.assertTrue(entered.wait(2))
-                self.assert_ready(pool.submit(self.app._finish_job), 'finish waited for old marker write')
+                finished = self.finish_while_marker_pending(pool, 'finish waited for old marker write')
                 self.start_new_cloud_run()
                 new_event, new_marker = self.app.stop_event, self.app._cancel_marker
                 result = self.assert_ready(pool.submit(self.app.stop), 'new stop waited for old run I/O lock')
@@ -155,6 +180,7 @@ class StudioStopConcurrencyTests(unittest.TestCase):
                 self.assertTrue(new_marker.is_file())
                 release.set()
                 self.assertEqual(pending.result(timeout=2), {'stopping': True})
+                finished.result(timeout=2)
                 self.assertFalse(old_event.is_set())
                 self.assertFalse(self.marker.exists())
                 self.assertTrue(new_marker.is_file(), 'old cleanup deleted the new run marker')
@@ -185,10 +211,11 @@ class StudioStopConcurrencyTests(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(2))
                 second = pool.submit(self.app.stop)
-                self.assert_ready(pool.submit(self.app._finish_job), 'finish waited for pending stop')
+                finished = self.finish_while_marker_pending(pool, 'finish waited for pending stop')
             finally: release.set()
             self.assertEqual(first.result(timeout=2), {'stopping': True})
             self.assertEqual(second.result(timeout=2), {'stopping': True})
+            finished.result(timeout=2)
         self.assertEqual(len(writes), 1, 'stale duplicate wrote after the final marker cleanup')
         self.assertFalse(self.marker.exists())
         self.assertFalse(self.app.stop_event.is_set())
@@ -234,11 +261,12 @@ class StudioStopConcurrencyTests(unittest.TestCase):
             pending = pool.submit(self.app.stop)
             try:
                 self.assertTrue(entered.wait(2))
-                self.assert_ready(pool.submit(self.app._finish_job), 'finish waited for failed stop write')
+                finished = self.finish_while_marker_pending(pool, 'finish waited for failed stop write')
                 self.start_new_cloud_run()
                 new_event, before = self.app.stop_event, deepcopy(self.app.job)
                 cleanup_fails.set(); release.set()
                 with self.assertRaises(PermissionError) as caught: pending.result(timeout=2)
+                finished.result(timeout=2)
                 self.assertIs(caught.exception, primary)
                 self.assertFalse(new_event.is_set())
                 self.assertEqual(self.app.job, before)

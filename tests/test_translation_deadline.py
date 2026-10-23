@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
@@ -179,11 +180,43 @@ class DeadlineTests(unittest.TestCase):
                            "runpy.run_module('subtitle_pipeline.translation_transport',run_name='__main__')")
                 def capture(args, **kwargs):
                     return original([sys.executable, '-X', 'utf8', '-c', program], **kwargs)
+                # This case must actually enter each blocked network phase.
+                # Give fixture startup its own bounded setup window, then run
+                # the real capture loop with the same 0.6s deadline. A private
+                # clock keeps worker imports out of this phase-specific check;
+                # the next test checks the unmodified total startup deadline.
+                started, phase_started = time.monotonic(), None
+                def phase_clock():
+                    nonlocal phase_started
+                    now = time.monotonic()
+                    if phase_started is None:
+                        if ready.exists():
+                            phase_started = now
+                        elif now - started >= 3:
+                            self.fail('worker did not reach the selected network phase within fixture setup')
+                    return started if phase_started is None else started + now - phase_started
+                clock = SimpleNamespace(monotonic=phase_clock, sleep=time.sleep)
                 with patch.object(local_process, 'capture_process', side_effect=capture), \
+                     patch.object(local_process, 'time', clock), \
                      patch.object(tr, '_REQUEST_TIMEOUT', 0.6, create=True):
                     with self.assertRaises(TimeoutError):
                         tr._request_json('http://127.0.0.1:9/')
                 self.assertTrue(ready.exists(), 'must enter the selected network phase')
+                self.assertIsNotNone(phase_started)
+                self.assertLess(time.monotonic() - phase_started, 2)
+        self.assert_reaped()
+
+    def test_total_deadline_also_covers_slow_worker_startup(self):
+        original = local_process.capture_process
+        def capture(args, **kwargs):
+            return original([sys.executable, '-X', 'utf8', '-c',
+                             'import time; time.sleep(10)'], **kwargs)
+        started = time.monotonic()
+        with patch.object(local_process, 'capture_process', side_effect=capture), \
+             patch.object(tr, '_REQUEST_TIMEOUT', 0.6, create=True):
+            with self.assertRaises(TimeoutError):
+                tr._request_json('http://127.0.0.1:9/')
+        self.assertLess(time.monotonic() - started, 2)
         self.assert_reaped()
 
     def test_cancel_preserves_completed_cache_releases_queue_and_does_not_expose_text_in_argv(self):
