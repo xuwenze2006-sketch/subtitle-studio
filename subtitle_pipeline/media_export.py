@@ -131,11 +131,47 @@ def _publish_video(partial,final,stop,*,expected_hash=None,emit=None):
                     raise
 
 
+def _matrix_rotation(text):
+    # ffprobe's integer rotation loses precision needed by FFmpeg's rounding.
+    try:
+        rows=[[int(value) for value in line.split(':',1)[1].split()]
+              for line in text.strip().splitlines()]
+        if len(rows)!=3 or any(len(row)!=3 for row in rows):raise ValueError
+        a,b,_=rows[0];c,d,_=rows[1]
+        sx,sy=math.hypot(a,c),math.hypot(b,d)
+        if not sx or not sy:raise ValueError
+        return -math.degrees(math.atan2(b/sy,a/sx))
+    except (AttributeError,IndexError,TypeError,ValueError,OverflowError) as error:
+        raise ValueError('视频旋转信息无效') from error
+
+
+def _display_dimensions(video):
+    """Pixel canvas after FFmpeg's default autorotation, before subtitles."""
+    rotation=video.get('tags',{}).get('rotate',0)
+    for data in video.get('side_data_list',[]):
+        if data.get('side_data_type')=='Display Matrix':
+            rotation=(_matrix_rotation(data['displaymatrix']) if 'displaymatrix' in data
+                      else data.get('rotation',0))
+            break
+    try:
+        angle=float(rotation)
+        if not math.isfinite(angle):raise ValueError
+        # FFmpeg get_rotation uses C round (half away from zero), then transpose.
+        angle=math.copysign(math.floor(abs(angle)+.5),angle)%360
+    except (TypeError,ValueError,OverflowError) as error:
+        raise ValueError('视频旋转信息无效') from error
+    width,height=video['width'],video['height']
+    # Match FFmpeg's transpose tolerance; arbitrary rotate keeps its canvas.
+    if abs(angle-90)<1 or abs(angle-270)<1:
+        width,height=height,width
+    return width,height
+
+
 def _validate_video_parameters(info,result):
     video=next(s for s in info['streams'] if s['codec_type']=='video')
     out=next(s for s in result['streams'] if s['codec_type']=='video')
-    for field in ('width','height'):
-        if video.get(field)!=out.get(field):raise ValueError('导出视频参数不一致：'+field)
+    for field,expected,actual in zip(('width','height'),_display_dimensions(video),_display_dimensions(out)):
+        if expected!=actual:raise ValueError('导出视频参数不一致：'+field)
     try:
         source_rate=Fraction(video['r_frame_rate']);output_rate=Fraction(out['r_frame_rate'])
         valid_rate=source_rate>0 and source_rate==output_rate
@@ -606,11 +642,12 @@ def render_video(campaign,manifest,source,captions,binding,stop,*,folder,final,
     finally:
         if converted is not None:cleanup_temporary(converted)
     video=next(s for s in info['streams'] if s['codec_type']=='video')
+    width,height=_display_dimensions(video)
     progress.duration=float(info['format']['duration'])
     import re
-    ass=re.sub(r'(?m)^PlayResX:.*$',f'PlayResX: {video["width"]}',ass)
-    ass=re.sub(r'(?m)^PlayResY:.*$',f'PlayResY: {video["height"]}',ass)
-    style=f'Style: Default,Microsoft YaHei,{round(video["height"]*25/474)},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1.6,0.6,2,20,20,20,1'
+    ass=re.sub(r'(?m)^PlayResX:.*$',f'PlayResX: {width}',ass)
+    ass=re.sub(r'(?m)^PlayResY:.*$',f'PlayResY: {height}',ass)
+    style=f'Style: Default,Microsoft YaHei,{round(height*25/474)},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1.6,0.6,2,20,20,20,1'
     ass=re.sub(r'(?m)^Style: Default,.*$',style,ass)
     r.atomic_text(folder/'captions.ass',ass)
     partial=folder/'result.partial.mp4'
