@@ -607,6 +607,7 @@ class StudioController:
             language,target=manifest_languages(manifest) if manifest else self._selection_languages(self._preview_selections()[0])
             review=load_review(self._output_dir(),language=language,target=target)
             result.update(revision=review['revision'],summary=review['summary'])
+            result.update(self._review_mode_fields(review))
             result['invalidates_approval']=approval.get('manual_revision')!=review['revision']
         except (ValueError,OSError,RuntimeError):
             result.update(conflict='原始结果或校对记录已变化，请在校对页核对。',invalidates_approval=True)
@@ -1259,6 +1260,12 @@ class StudioController:
     def preview(self,sample=None,project_id=None):
         return self._read_view(lambda view:view._preview_data(sample),project_id)
 
+    @staticmethod
+    def _review_mode_fields(review):
+        # Legacy responses stay unchanged; source-only capability travels with
+        # every preview/receipt rather than being guessed from absent text.
+        return {'mode':'source_only','acceptance_supported':False} if review.get('mode')=='source_only' else {}
+
     def _preview_data(self,sample=None):
         selected,choices=self._preview_selection(sample)
         language,target_language=self._selection_languages(selected)
@@ -1300,15 +1307,18 @@ class StudioController:
         # the original generation evidence and machine subtitles stay intact.
         identity=state.get('identity')
         source_identity=identity.get('source') if isinstance(identity,dict) else None
+        config=state.get('config')
+        source_only_candidate=isinstance(config,dict) and config.get('translate') is False
         record=self._contained_path(self._contained_path(folder,'人工校对'),'校对记录.json')
         # An existing overlay must report a binding conflict even when its
         # base metadata/tracks are damaged, never silently disappear.
-        if record.exists() or (source and target and type(state.get('duration_ms')) is int
+        if record.exists() or (source and (target or source_only_candidate) and type(state.get('duration_ms')) is int
                 and isinstance(source_identity,dict) and source_identity.get('sha256')):
             try:
                 from .manual_review import load_review
                 review=load_review(folder,language=language,target=target_language)
-                result['manual_review']={'supported':True,'revision':review['revision'],'summary':review['summary']}
+                result['manual_review']={'supported':True,'revision':review['revision'],'summary':review['summary'],
+                                         **self._review_mode_fields(review)}
                 result['cues']=[{**cue,'ja':cue['source_text'],'zh':cue['target_text']} for cue in review['cues']]
             except (ValueError,OSError,RuntimeError) as error:
                 result['manual_review']={'supported':True,'conflict':str(error)}
@@ -1370,8 +1380,11 @@ class StudioController:
                 if (folder/'人工校对'/'校对记录.json').exists():
                     from .manual_review import materialize_review
                     revision=materialize_review(folder,language=language,target=target)
-                    selected.update(track_folder=revision['folder'],manual_review={
-                        'revision':revision['revision'],'summary':revision['summary'],'binding':revision['binding']})
+                    selected.update(track_folder=revision['folder'],
+                        tracks=tuple(Path(item['path']).name for item in revision['files']
+                            if Path(item['path']).name in output_names(target)),manual_review={
+                        'revision':revision['revision'],'summary':revision['summary'],'binding':revision['binding'],
+                        **self._review_mode_fields(revision)})
                 return save_subtitle_snapshot(project,Path(self.source),selected,
                     created_at=self._project_created_at())
 
@@ -1393,7 +1406,9 @@ class StudioController:
                 locks.enter_context(ProjectLock(project))
                 if selected['folder']!=project:locks.enter_context(ProjectLock(selected['folder']))
                 revision=materialize_review(selected['folder'],language=language,target=target)
-                return self._contained_path(revision['folder'],name)
+                path=self._contained_path(revision['folder'],name)
+                if not path.is_file():raise ValueError('当前校对版本不包含所选字幕')
+                return path
         path=self._contained_path(selected['folder'],name)
         if not path.is_file():raise ValueError('字幕尚未生成')
         return path
@@ -1436,7 +1451,8 @@ class StudioController:
                 return {'kind':'review-cue','project_id':self._project_id(),'selected_id':selected['id'],
                         'base_revision':data['expected_revision'],
                         'cue':{**cue,'ja':cue['source_text'],'zh':cue['target_text']},
-                        'manual_review':{'supported':True,'revision':review['revision'],'summary':review['summary']},
+                        'manual_review':{'supported':True,'revision':review['revision'],'summary':review['summary'],
+                                         **self._review_mode_fields(review)},
                         'exported_video':None,'draft_video':None}
             return self._preview_data(selected['id'])
 

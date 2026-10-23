@@ -30,6 +30,9 @@ import "./preview-ux.css";
 import "./review-layout.css";
 import "./file-layout.css";
 
+const hasSourceOnlyDraftConflict = (data, draft) => data?.manual_review?.mode === "source_only" &&
+  !!draft && (!!draft.fields.target_text || draft.fields.translation_confirmed === true);
+
 export default function Preview(props) {
   // A new project owns a new player, search and request lifetime.
   const projectKey = JSON.stringify([
@@ -101,7 +104,9 @@ function PreviewSession({
   }, [subtitleVersions, versionSnapshot, selectedId, onError]);
   const reviewBusy = reviewActionBusy || reviewSubmissions.pending(selectedId);
   const reviewPending = hasPendingReviewSubmissions(submissionOwner);
-  const reviewDirty = isReviewDirty(reviewDraft);
+  const sourceOnly = preview?.manual_review?.mode === "source_only";
+  const sourceOnlyDraftConflict = hasSourceOnlyDraftConflict(preview, reviewDraft);
+  const reviewDirty = isReviewDirty(reviewDraft) || sourceOnlyDraftConflict;
   useLayoutEffect(() => {
     const previous = reviewDraftRef.current;
     reviewDraftRef.current = reviewDraft;
@@ -120,7 +125,7 @@ function PreviewSession({
   }, [projectKey, reviewDraft]);
   const restoreReviewDraft = useCallback(data => {
     const current = reviewDraftRef.current;
-    if (isReviewDirty(current)) return;
+    if (isReviewDirty(current) || hasSourceOnlyDraftConflict(data, current)) return;
     // A fresh read can already contain the saved revision. Retain the exact
     // submitted editor state until its save-and-next acknowledgement is used.
     const submission = reviewSubmissions.peekSubmission(data.selected_id);
@@ -252,8 +257,9 @@ function PreviewSession({
   const hasActiveDraft = !!activeReviewDraft;
   const missingDraftCue = useMemo(() => supportsReview && hasActiveDraft && !cues.some(cue => cue.id === activeDraftCueId),
     [supportsReview, hasActiveDraft, cues, activeDraftCueId]);
-  const recoveryDraft = missingDraftCue || (reviewDirty && (!supportsReview || !activeReviewDraft)) ? reviewDraft : null;
-  const draftConflict = !supportsReview || !activeReviewDraft ? "" : missingDraftCue
+  const recoveryDraft = sourceOnlyDraftConflict || missingDraftCue || (reviewDirty && (!supportsReview || !activeReviewDraft)) ? reviewDraft : null;
+  const draftConflict = sourceOnlyDraftConflict ? "原文模式无法提交含译文或翻译确认的旧草稿，内容已保留，请复制需要的内容或放弃草稿"
+    : !supportsReview || !activeReviewDraft ? "" : missingDraftCue
     ? "草稿对应的原句已不存在，内容已保留，请复制需要的内容或放弃草稿"
     : activeReviewDraft.revision !== preview.manual_review.revision
       ? "草稿基准版本已变化，输入已保留" : "";
@@ -582,6 +588,7 @@ function PreviewSession({
       setReviewConflict(data.manual_review?.conflict || "");
       setReviewDraft(current => {
         if (!current) return null;
+        if (hasSourceOnlyDraftConflict(data, current)) return current;
         const cue = data.cues.find(item => item.id === current.cueId);
         if (!cue) return current;
         if (!isReviewDirty(current)) return createReviewDraft(cue, data.manual_review?.revision, selectedId);
@@ -617,7 +624,7 @@ function PreviewSession({
     const { start_ms: start, end_ms: end } = range;
     if (status === "issue" && !fields.note.trim()) { setReviewError("请填写核对备注，说明本句疑点。"); return; }
     const cue = cues.find(item => item.id === reviewDraft.cueId);
-    const stale = cue?.translation_stale || fields.source_text !== (cue?.source_text ?? cue?.ja ?? "");
+    const stale = !sourceOnly && (cue?.translation_stale || fields.source_text !== (cue?.source_text ?? cue?.ja ?? ""));
     const finalStatus = stale && !fields.translation_confirmed && status === "checked" ? "unchecked" : status;
     // Supersede old status reads when a new operation starts, including the
     // interval before its write acknowledgement initiates the next refresh.
@@ -629,7 +636,7 @@ function PreviewSession({
         review_status: finalStatus, note: fields.note, translation_confirmed: fields.translation_confirmed }), { advance });
   };
   const acceptReview = () => {
-    if (!supportsReview || selectedId !== "main" || disabled || loading || reviewBusy || reviewDirty || snapshot?.job?.busy || reviewConflict || draftConflict || !preview.manual_review.summary?.can_accept) return;
+    if (!supportsReview || sourceOnly || preview.manual_review.acceptance_supported === false || selectedId !== "main" || disabled || loading || reviewBusy || reviewDirty || snapshot?.job?.busy || reviewConflict || draftConflict || !preview.manual_review.summary?.can_accept) return;
     ++taskRefreshRequest.current;
     setReviewError("");
     const readVersion = requestVersion.current;
@@ -658,7 +665,7 @@ function PreviewSession({
     setLocateRequest({ index: entry.index });
     if (canPlay) seek(entry.cue);
   };
-  const draftExport = (snapshot?.actions?.["export-draft"] !== undefined || preview?.draft_video || snapshot?.job?.action === "export-draft") &&
+  const draftExport = !sourceOnly && (snapshot?.actions?.["export-draft"] !== undefined || preview?.draft_video || snapshot?.job?.action === "export-draft") &&
     <section className="card preview-export-card preview-draft-export-card" aria-label="草稿成片导出">
       <div>
         <h2><Clapperboard size={18} /> 草稿 MP4 <Badge tone="warning">未审核草稿</Badge></h2>
@@ -691,7 +698,7 @@ function PreviewSession({
             {cues.length} 条字幕
           </Badge>
           <span className="preview-source-name" title={preview?.source_name}>{preview?.source_name || "当前任务"}</span>
-          {preview?.source_language && <Badge>{languageLabels[preview.source_language]} → {languageLabels[preview.target_language]}</Badge>}
+          {preview?.source_language && <Badge>{sourceOnly ? `${languageLabels[preview.source_language] || preview.source_language} · 原文字幕` : `${languageLabels[preview.source_language]} → ${languageLabels[preview.target_language]}`}</Badge>}
         </div>
         <div className="preview-toolbar-actions">
           <Button
@@ -852,7 +859,7 @@ function PreviewSession({
           </div>
           <div className="preview-search">
             <Search size={16} aria-hidden="true" />
-            <input type="search" aria-label="搜索字幕" placeholder="搜索原文或译文…" value={query} onChange={(event) => changeQuery(event.target.value)} disabled={loading || !cues.length} />
+            <input type="search" aria-label="搜索字幕" placeholder={sourceOnly ? "搜索原文…" : "搜索原文或译文…"} value={query} onChange={(event) => changeQuery(event.target.value)} disabled={loading || !cues.length} />
             {query && <button type="button" aria-label="清空搜索" onClick={() => changeQuery("")}><X size={15} aria-hidden="true" /></button>}
           </div>
           {supportsReview && <label className="cue-review-filter">核对状态筛选<select aria-label="核对状态筛选" value={reviewFilter} onChange={event => { timelineMemory.current = null; setReviewFilter(event.target.value); }}><option value="all">全部</option><option value="unchecked">未检查</option><option value="issue">有疑点</option><option value="checked">已检查</option><option value="warnings">有自动检查提示</option></select></label>}
@@ -872,14 +879,16 @@ function PreviewSession({
           {draftStorageWarning && <p className="manual-review-warning">{draftStorageWarning}</p>}
           {recoveryDraft && <section className="manual-review" aria-label="恢复的草稿内容">
             <h3>恢复的草稿内容</h3>
+            {sourceOnlyDraftConflict && <p>当前为原文字幕模式，旧草稿的译文和翻译确认已保留，可复制后另行处理；放弃此稿后可继续核对原文。</p>}
             {!supportsReview && <p>当前预览暂时无法用于校对，未保存内容已保留。可复制草稿，刷新结果后继续，或放弃修改后切换任务。</p>}
             <p>{recoveryDraft.fields.start} → {recoveryDraft.fields.end}</p>
             <label>草稿原文<textarea rows={3} readOnly value={recoveryDraft.fields.source_text} /></label>
             <label>草稿译文<textarea rows={3} readOnly value={recoveryDraft.fields.target_text} /></label>
+            {sourceOnlyDraftConflict && <p>草稿翻译确认：{recoveryDraft.fields.translation_confirmed ? "已确认" : "未确认"}</p>}
             <label>草稿核对备注<textarea rows={2} readOnly value={recoveryDraft.fields.note} /></label>
             <Button onClick={discardReviewDraft} disabled={reviewBusy || reviewPending}>放弃未保存修改</Button>
           </section>}
-          {supportsReview && <ManualReview preview={preview} selectedId={selectedId} draft={activeReviewDraft}
+          {supportsReview && <ManualReview preview={preview} selectedId={selectedId} draft={sourceOnlyDraftConflict ? null : activeReviewDraft}
             onDraftChange={setReviewDraft} onDiscard={discardReviewDraft} onSave={saveReviewCue} onRefresh={refreshReview} onAccept={acceptReview} onNext={nextUnchecked}
             onListen={listenReviewCue} canListen={canPlay}
             disabled={disabled || loading || !!snapshot?.job?.busy} busy={reviewBusy} error={reviewError}
@@ -887,7 +896,7 @@ function PreviewSession({
         </section>
       </div>
       {!compact && draftExport}
-      {!compact && <section className="card preview-export-card" aria-label="成片导出">
+      {!compact && !sourceOnly && <section className="card preview-export-card" aria-label="成片导出">
         <div>
           <h2><Clapperboard size={18} /> 审核版 MP4</h2>
           <p>{preview?.exported_video ? preview.exported_video.name : snapshot?.actions?.export ? "将审核后的译文字幕压入画面，保留原视频。" : "需要审核版时，先完成整片字幕与人工抽检。"}</p>
@@ -935,7 +944,8 @@ function PreviewSession({
           </div>
         </section>
       )}
-      {!compact && <div className="preview-review-note">
+      {!compact && sourceOnly && <p className="preview-review-note">逐句核对并保存后，可下载原文字幕或保存字幕版本。</p>}
+      {!compact && !sourceOnly && <div className="preview-review-note">
         <ListChecks size={19} />
         <div>
           <strong>{supportsReview ? "人工核对记录保存在当前任务" : "预览是检查的开始"}</strong>

@@ -4,7 +4,7 @@ Callers MUST hold ``runner.ProjectLock(folder)`` around save/materialize and any
 coordinated load/approval operation. The smaller stable review lock additionally
 serializes standalone review writers; it does not lock the generation pipeline.
 Reading never creates files. Saving changes only one sparse JSON record, and
-explicit materialization publishes an immutable, coherent three-track snapshot.
+explicit materialization publishes an immutable snapshot of the available tracks.
 """
 from __future__ import annotations
 
@@ -32,6 +32,8 @@ class ReviewConflict(ValueError):
 
 _CONTENT_FIELDS = ('start_ms', 'end_ms', 'source_text', 'target_text')
 _PATCH_FIELDS = frozenset((*_CONTENT_FIELDS, 'review_status', 'note', 'translation_stale'))
+_SOURCE_PATCH_FIELDS = frozenset(('start_ms', 'end_ms', 'source_text', 'review_status', 'note'))
+_TRANSLATED_TRACKS = ('中文草稿.srt', '英文草稿.srt', '日文草稿.srt', '双语草稿.srt')
 _STATUSES = frozenset(('unchecked', 'checked', 'issue'))
 _RECORD = '校对记录.json'
 _BASE_CACHE = ReviewBaseCache()
@@ -125,14 +127,18 @@ def _text(value, label, maximum, *, subtitle=False):
     return value
 
 
-def _cue(cue, duration):
+def _cue(cue, duration, *, source_only=False):
     if (type(cue['start_ms']) is not int or type(cue['end_ms']) is not int
             or not 0 <= cue['start_ms'] < cue['end_ms'] <= duration):
         raise ValueError('字幕时间须为媒体范围内的整数毫秒，且结束晚于开始')
     _text(cue['source_text'], '原文', 4000, subtitle=True)
-    _text(cue['target_text'], '译文', 4000, subtitle=True)
-    if not valid_translation_content(cue['source_text'], cue['target_text']):
-        raise ValueError('译文缺少有效文字内容')
+    if source_only:
+        if cue['target_text'] != '' or cue['translation_stale'] is not False:
+            raise ValueError('原文校对不能含译文或译文待确认标记')
+    else:
+        _text(cue['target_text'], '译文', 4000, subtitle=True)
+        if not valid_translation_content(cue['source_text'], cue['target_text']):
+            raise ValueError('译文缺少有效文字内容')
     if not isinstance(cue['review_status'], str) or cue['review_status'] not in _STATUSES:
         raise ValueError('校对状态无效')
     _text(cue['note'], '校对备注', 2000)
@@ -142,13 +148,17 @@ def _cue(cue, duration):
         raise ValueError('译文待确认，不能标为已校对')
 
 
-def _validate_cues(cues, duration):
+def _validate_cues(cues, duration, *, source_only=False):
     previous_start = -1
     for cue in cues:
-        _cue(cue, duration)
+        _cue(cue, duration, source_only=source_only)
         if cue['start_ms'] < previous_start:
             raise ValueError('字幕开始时间须按原有条目顺序递增；本轮不支持重排')
         previous_start = cue['start_ms']
+
+
+def _validate_source_cues(cues, duration):
+    _validate_cues(cues, duration, source_only=True)
 
 
 def _record(path):
@@ -156,19 +166,33 @@ def _record(path):
     if raw is None:
         return None, None
     record = _json(raw, '人工校对记录')
-    if (not isinstance(record, dict) or set(record) != {'version', 'binding', 'patches'}
-            or type(record['version']) is not int or record['version'] != 1
+    if (not isinstance(record, dict) or type(record.get('version')) is not int
+            or not (record['version'] == 1 and set(record) == {'version', 'binding', 'patches'}
+                    or record['version'] == 2
+                    and set(record) == {'version', 'mode', 'binding', 'patches'}
+                    and record['mode'] == 'source_only')
             or not isinstance(record['binding'], dict) or not isinstance(record['patches'], dict)):
         raise ValueError('人工校对记录格式无效，请保留原文件并检查')
     return record, raw
 
 
-def _base(root, language, target):
-    validate_languages(language, target)
+def _source_only_eligible(root, state):
+    config = state.get('config') if isinstance(state, dict) else None
+    return (isinstance(config, dict) and config.get('translate') is False
+            and not any(_path(root, name).exists() for name in _TRANSLATED_TRACKS))
+
+
+def _base(root, language, target, *, source_only=False):
+    # None selects a new record's mode from this same state read. Existing
+    # records pass their fixed mode, so a configuration change cannot migrate it.
+    validate_languages(language, target, allow_auto=source_only is not False)
     state = _json(_read(_path(root, 'state.json'), '项目状态'), '项目状态')
     if (not isinstance(state, dict) or not isinstance(state.get('identity'), dict)
             or type(state.get('duration_ms')) is not int or state['duration_ms'] <= 0):
         raise ValueError('项目状态缺少有效 identity 或 duration_ms')
+    if source_only is None:
+        source_only = _source_only_eligible(root, state)
+        validate_languages(language, target, allow_auto=source_only)
     identity = state['identity']
     source = identity.get('source')
     if (not isinstance(source, dict) or not isinstance(source.get('sha256'), str)
@@ -176,9 +200,16 @@ def _base(root, language, target):
         raise ValueError('项目 identity 缺少有效素材 SHA256')
     if (identity.get('language', 'ja'), identity.get('target', 'zh-CN')) != (language, target):
         raise ValueError('校对语言与项目状态不一致')
+    if source_only and not _source_only_eligible(root, state):
+        raise ReviewConflict('原文校对模式或字幕轨已改变；人工校对记录已保留，请核对')
     names = output_names(target)
-    content = [_read(_path(root, name), '机器字幕') for name in names[:2]]
+    content = [_read(_path(root, name), '机器字幕') for name in names[:1 if source_only else 2]]
     report = _read(_path(root, '需复核.json'), '自动复核清单', optional=True)
+    if source_only:
+        binding = {'mode': 'source_only', 'identity': identity, 'duration_ms': state['duration_ms'],
+                   'language': language, 'target': target, 'source_sha256': _digest(content[0]),
+                   'issues_sha256': _digest(report) if report is not None else None}
+        return binding, content, report
     binding = {'identity': identity, 'duration_ms': state['duration_ms'],
                'language': language, 'target': target,
                'source_sha256': _digest(content[0]), 'target_sha256': _digest(content[1]),
@@ -188,8 +219,18 @@ def _base(root, language, target):
 
 def _base_cues(content):
     try:
+        if len(content) == 1:
+            source = parse_srt(content[0].decode('utf-8-sig'))
+            if not source:
+                raise ValueError('原文字幕不能为空')
+            return [{'id': index, 'start_ms': cue.start_ms, 'end_ms': cue.end_ms,
+                     'source_text': cue.text, 'target_text': '', 'review_status': 'unchecked',
+                     'note': '', 'translation_stale': False, 'warnings': []}
+                    for index, cue in enumerate(source, 1)]
         source, translated = [parse_srt(raw.decode('utf-8-sig')) for raw in content]
     except (ValueError, UnicodeError) as error:
+        if len(content) == 1:
+            raise ValueError('机器原文字幕格式无效，请先恢复有效原文') from error
         raise ValueError('机器字幕格式无效，请先恢复有效原文和译文') from error
     if not source or len(source) != len(translated) or any(
             (a.start_ms, a.end_ms) != (b.start_ms, b.end_ms) for a, b in zip(source, translated)):
@@ -236,7 +277,7 @@ def _warnings(report, cues):
                 cue['warnings'].append(reason)
 
 
-def _summary(cues):
+def _summary(cues, *, source_only=False):
     total = len(cues)
     checked = sum(cue['review_status'] == 'checked' for cue in cues)
     issues = sum(cue['review_status'] == 'issue' for cue in cues)
@@ -244,13 +285,15 @@ def _summary(cues):
     required = min(20, total)
     return {'total': total, 'checked': checked, 'issues': issues,
             'pending_translation': pending, 'required_checks': required,
-            'can_accept': bool(total and checked >= required and not issues and not pending)}
+            'can_accept': bool(not source_only and total and checked >= required and not issues and not pending)}
 
 
 def _load(root, language, target):
     record, raw = _record(_path(root, '人工校对', _RECORD))
     try:
-        binding, content, report = _base(root, language, target)
+        source_only = record['version'] == 2 if record is not None else None
+        binding, content, report = _base(root, language, target, source_only=source_only)
+        source_only = binding.get('mode') == 'source_only'
     except ValueError as error:
         if record is not None:
             raise ReviewConflict('机器字幕或项目状态已改变；人工校对记录已保留，请核对') from error
@@ -258,22 +301,27 @@ def _load(root, language, target):
     if record is not None and record['binding'] != binding:
         raise ReviewConflict('机器字幕或项目状态已改变；人工校对记录已保留，请核对')
     base = _BASE_CACHE.read(binding, content, parser=parse_srt,
-                            validator=_validate_cues, builder=_base_cues)
+                            validator=_validate_source_cues if source_only else _validate_cues,
+                            builder=_base_cues)
     exists = record is not None
     if record is None:
-        record = {'version': 1, 'binding': binding, 'patches': {}}
+        record = ({'version': 2, 'mode': 'source_only', 'binding': binding, 'patches': {}}
+                  if source_only else {'version': 1, 'binding': binding, 'patches': {}})
         raw = _encode(record)
     cues = [dict(cue, warnings=[]) for cue in base]
     for key, patch in record['patches'].items():
         if (not isinstance(key, str) or re.fullmatch(r'[1-9][0-9]*', key) is None
                 or len(key) > 12 or not 1 <= int(key) <= len(cues)
-                or not isinstance(patch, dict) or not patch or not set(patch) <= _PATCH_FIELDS):
+                or not isinstance(patch, dict) or not patch
+                or not set(patch) <= (_SOURCE_PATCH_FIELDS if source_only else _PATCH_FIELDS)):
             raise ValueError('人工校对记录含无效条目或字段')
         cues[int(key) - 1].update(patch)
-    _validate_cues(cues, binding['duration_ms'])
+    _validate_cues(cues, binding['duration_ms'], source_only=source_only)
     _warnings(report, cues)
     view = {'revision': _digest(raw), 'binding': binding, 'cues': cues,
-            'summary': _summary(cues), 'exists': exists}
+            'summary': _summary(cues, source_only=source_only), 'exists': exists}
+    if source_only:
+        view.update(mode='source_only', acceptance_supported=False)
     return view, base, record, raw
 
 
@@ -306,6 +354,9 @@ def save_review(folder: Path, data: dict, *, language='ja', target='zh-CN') -> d
     root = _root(folder)
     with _review_lock(root):
         view, base, record, _ = _load(root, language, target)
+        source_only = record['version'] == 2
+        if source_only and (data['target_text'] != '' or data['translation_confirmed'] is not False):
+            raise ValueError('原文校对不能提交译文或译文确认')
         if not isinstance(data['expected_revision'], str) or data['expected_revision'] != view['revision']:
             raise ReviewConflict('校对版本已变化，请刷新后再保存；本次内容尚未写入')
         cue_id = data['cue_id']
@@ -315,14 +366,16 @@ def save_review(folder: Path, data: dict, *, language='ja', target='zh-CN') -> d
         edited = {**current, **{key: data[key] for key in (*_CONTENT_FIELDS, 'note')}}
         changed = any(edited[key] != current[key] for key in _CONTENT_FIELDS)
         edited['review_status'] = data.get('review_status', 'unchecked' if changed else current['review_status'])
-        if edited['source_text'] != current['source_text']:
+        if not source_only and edited['source_text'] != current['source_text']:
             edited['translation_stale'] = True
         if edited['target_text'] != current['target_text'] or data['translation_confirmed']:
             edited['translation_stale'] = False
         cues = view['cues'][:]
         cues[cue_id - 1] = edited
-        _validate_cues(cues, view['binding']['duration_ms'])
-        patch = {key: edited[key] for key in (*_CONTENT_FIELDS, 'review_status', 'note', 'translation_stale')
+        _validate_cues(cues, view['binding']['duration_ms'], source_only=source_only)
+        fields = (('start_ms', 'end_ms', 'source_text', 'review_status', 'note') if source_only
+                  else (*_CONTENT_FIELDS, 'review_status', 'note', 'translation_stale'))
+        patch = {key: edited[key] for key in fields
                  if edited[key] != base[cue_id - 1][key]}
         if patch:
             record['patches'][str(cue_id)] = patch
@@ -330,7 +383,7 @@ def save_review(folder: Path, data: dict, *, language='ja', target='zh-CN') -> d
             record['patches'].pop(str(cue_id), None)
         # The project lock prevents generation races; recheck also catches most
         # unsupported external editors before committing any manual changes.
-        if _base(root, language, target)[0] != view['binding']:
+        if _base(root, language, target, source_only=source_only)[0] != view['binding']:
             raise ReviewConflict('保存期间机器字幕发生变化；本次校对未写入')
         from .runner import atomic_json
         atomic_json(_path(root, '人工校对', _RECORD), record)
@@ -338,6 +391,9 @@ def save_review(folder: Path, data: dict, *, language='ja', target='zh-CN') -> d
 
 
 def _snapshot_files(view, raw, target):
+    if view.get('mode') == 'source_only':
+        source = [Cue(cue['start_ms'], cue['end_ms'], cue['source_text']) for cue in view['cues']]
+        return {'原文.srt': render_srt(source).encode('utf-8'), _RECORD: raw}
     source, translated, bilingual = [], [], []
     for cue in view['cues']:
         start, end = cue['start_ms'], cue['end_ms']
@@ -369,6 +425,9 @@ def materialize_review(folder: Path, *, language='ja', target='zh-CN',
     root = _root(folder)
     with _review_lock(root):
         view, _, _, raw = _load(root, language, target)
+        source_only = view.get('mode') == 'source_only'
+        if source_only and require_accepted:
+            raise ValueError('原文校对不支持双语最终验收；可导出校对后的原文字幕')
         if require_accepted and not view['summary']['can_accept']:
             raise ValueError('尚未达到人工校对门槛，或仍有人工疑点/待确认译文')
         expected = _snapshot_files(view, raw, target)
@@ -385,7 +444,7 @@ def materialize_review(folder: Path, *, language='ja', target='zh-CN',
                         stream.write(content)
                         stream.flush()
                         os.fsync(stream.fileno())
-                if _base(root, language, target)[0] != view['binding']:
+                if _base(root, language, target, source_only=source_only)[0] != view['binding']:
                     raise ReviewConflict('导出期间机器字幕发生变化；快照未发布')
                 # Review lock serializes publication. rename is a same-volume,
                 # atomic directory publication; no destination is overwritten.
@@ -396,7 +455,10 @@ def materialize_review(folder: Path, *, language='ja', target='zh-CN',
                         raise ValueError('校对暂存目录超出版本目录')
                     shutil.rmtree(staging)
             _verify_snapshot(root, destination, expected)
-        return {'folder': destination, 'revision': view['revision'],
+        result = {'folder': destination, 'revision': view['revision'],
                 'files': [{'path': str(destination / name), 'sha256': _digest(content)}
                           for name, content in expected.items()],
                 'summary': view['summary'], 'binding': view['binding']}
+        if source_only:
+            result.update(mode='source_only', acceptance_supported=False)
+        return result

@@ -746,7 +746,8 @@ def _run_locked(config, stop, progress):
             if state.get('manual_outputs'):
                 state['message'] += '；手动修改已保留，最新自动结果在“自动更新”目录'
             if state.get('merged_source_edited'):
-                state['message'] += '；合并原文修改已采用，旧译文已备份，保留的人工译文及新译文需复核'
+                state['message'] += ('；合并原文修改已采用，旧译文已备份，保留的人工译文及新译文需复核'
+                    if config.translate else '；合并原文修改已采用，请结合原音复核')
         expected=[state['parts'].get(str(ch.index),{}) for ch in chunks]
         state.update(total=total, recognized=sum(p.get('asr')=='done' for p in expected), translated=sum(p.get('translation')=='done' for p in expected), updated=time.time())
         if config.asr_provider=='qwen_asr':
@@ -1321,7 +1322,8 @@ def _run_locked(config, stop, progress):
                                          source_sha256=identity['source']['sha256'],language=config.language) for ch in chunks)
                 state['status'] = ('cancelled' if stop.is_set() else 'asr_incomplete' if asr_errors or not asr_valid else 'translation_incomplete' if translation_errors or not translation_valid else 'complete')
             stage='publish'
-            message={'complete':'处理完成；译文为草稿，请查看需复核清单','cancelled':'已停止，已完成片段已保存；可继续','asr_incomplete':'部分识别失败；已完成片段保留，请查看状态并继续','translation_incomplete':'识别已保存，部分翻译失败；可稍后继续'}[state['status']]
+            message={'complete':('处理完成；译文为草稿，请查看需复核清单' if config.translate else
+                '处理完成；原文字幕已保存，请结合原音复核'),'cancelled':'已停止，已完成片段已保存；可继续','asr_incomplete':'部分识别失败；已完成片段保留，请查看状态并继续','translation_incomplete':'识别已保存，部分翻译失败；可稍后继续'}[state['status']]
             if scheduler_failed:
                 message=('已停止；' if state['status']=='cancelled' else '')+'调度中断，已核验的完成片段已保存；任务未完成，可继续'
             publish(message)

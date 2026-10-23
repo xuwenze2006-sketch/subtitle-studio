@@ -57,7 +57,7 @@ const navigation = [
     display: "字幕校对",
     icon: Clapperboard,
     heading: "字幕校对",
-    description: "听原声，对照双语字幕；按句定位、重播与检查。",
+    description: "听原声，核对字幕；按句定位、重播与检查。",
   },
   {
     id: "settings",
