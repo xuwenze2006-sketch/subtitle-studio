@@ -27,7 +27,7 @@ function service({ busy = false } = {}) {
     } else if (url === "/api/stop") {
       snapshot = { ...snapshot, job: { ...snapshot.job, busy: false, status: "cancelled" } };
       data = { stopped: true };
-    } else if (url === "/api/state" || url === "/api/progress") data = snapshot;
+    } else if (url === "/api/state?include_video=false" || url === "/api/progress") data = snapshot;
     else if (url === "/api/environment") data = { version: 1, checks: {}, export_ready: false };
     else if (url.startsWith("/api/preview")) data = {
       project_id: snapshot.project_id, selected_id: "main", cues: [], selections: [], downloads: [], media_available: false,

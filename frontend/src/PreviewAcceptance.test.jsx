@@ -107,7 +107,7 @@ describe("session-owned final acceptance receipts", () => {
     vi.stubGlobal("fetch", vi.fn(async url => {
       calls.push(url);
       if (url === "/api/review-accept") return pending.promise;
-      return respond(url === "/api/state" ? snapshot : url.startsWith("/api/preview") ? base
+      return respond(url === "/api/state?include_video=false" ? snapshot : url.startsWith("/api/preview") ? base
         : url === "/api/environment" ? { checks: {}, export_ready: false } : {});
     }));
     await act(async () => render(<App />));

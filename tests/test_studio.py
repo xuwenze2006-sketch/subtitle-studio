@@ -1078,6 +1078,11 @@ class RunningInstanceTests(unittest.TestCase):
         self.connection.request.side_effect=TimeoutError('loopback listen queue is busy')
         self.assertEqual(self.s.running_instance(self.runtime),self.existing)
 
+    def test_relaunch_probe_requests_lightweight_state(self):
+        self.assertEqual(self.s.running_instance(self.runtime),self.existing)
+        self.connection.request.assert_called_once_with('GET','/api/state?include_video=false',
+            headers={'X-Subtitle-Token':'synthetic-instance-review-token'})
+
     def test_live_unexpected_response_blocks_duplicate_service(self):
         for status,body in ((503,b'{}'),(403,b'{}'),(200,b'[]'),(200,b'{"app":"other"}'),(200,b'not JSON')):
             with self.subTest(status=status,body=body):

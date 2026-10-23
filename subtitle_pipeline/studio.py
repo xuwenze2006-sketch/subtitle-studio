@@ -482,12 +482,12 @@ class StudioController:
         result.update(job=deepcopy(self.job),persistence_warning=self.persistence_warning)
         return result
 
-    def state(self):
+    def state(self,include_video=True):
         # State polling has no project token. Retry one changed selection so a
         # normal project switch does not appear to the UI as a lost connection.
         for attempt in range(2):
             try:
-                return self._read_view(lambda view:view._state_data(),finish=self._refresh_state_job)
+                return self._read_view(lambda view:view._state_data(include_video),finish=self._refresh_state_job)
             except ProjectSelectionChanged:
                 if attempt:
                     raise
@@ -514,7 +514,7 @@ class StudioController:
         result['persistence_warning']=self.persistence_warning
         return result
 
-    def _state_data(self):
+    def _state_data(self,include_video=True):
         with self.lock:
             error=''
             try:values=account_environment();saved=encrypted_names()
@@ -540,7 +540,7 @@ class StudioController:
                 'accounts':accounts,'settings':settings,'settings_error':error,
                 'recent':self._recent_state(),'local_available':local,
                 'persistence_warning':self.persistence_warning,'project_error':''}
-            try:result.update(self._project_state_data(accounts,ready,local))
+            try:result.update(self._project_state_data(accounts,ready,local,include_video))
             except (OSError,ValueError,TypeError,AttributeError,KeyError):
                 # A damaged selected project's display data must not disconnect
                 # the host or prevent choosing another task. Never repair it here.
@@ -554,7 +554,7 @@ class StudioController:
                         'project_path':self.campaign,'exports_path':'','created_at':'','video_path':''})
             return result
 
-    def _project_state_data(self,accounts,ready,local):
+    def _project_state_data(self,accounts,ready,local,include_video=True):
         """Read project display data separately from the host's connection state."""
         manifest=read_json(self._project_path()/'campaign.json',strict=True) if self.campaign else {}
         previous=self._saved_state(strict=True)
@@ -601,7 +601,7 @@ class StudioController:
         return {'job':job,'actions':actions,'campaign_status':stage,
             'approval_exists':approval,'siliconflow_result_exists':sf_result,
             'project_config':project_config,'budget':self._budget_summary(config,manifest),
-            'manual_review':manual_status,'file_layout':self._file_layout_data(previous)}
+            'manual_review':manual_status,'file_layout':self._file_layout_data(previous,include_video)}
 
     def _manual_status(self,manifest):
         result={'supported':True}
@@ -638,14 +638,18 @@ class StudioController:
             except (ValueError,OSError,OverflowError):pass
         return ''
 
-    def _file_layout_data(self,previous=None):
+    def _file_layout_data(self,previous=None,include_video=True):
         result={'source_path':self.source,'project_path':self.campaign,
                 'exports_path':'','created_at':'','video_path':''}
         if not self.campaign:return result
         project=self._project_path()
         result['exports_path']=str(self._contained_path(project,'导出'))
         result['created_at']=self._project_created_at(previous)
-        video=self._exported_video_path()
+        if include_video:
+            video=self._exported_video_path()
+        else:
+            from .studio_video_download import cached_match
+            video=self._exported_video_path(video_matches=lambda path,digest:cached_match(path,digest,self._video_checks))
         if video:result['video_path']=str(video)
         return result
 
@@ -761,7 +765,7 @@ class StudioController:
         with self.lock:
             if selection!=self._selection_revision:
                 raise ProjectSelectionChanged('其他窗口已切换项目，请刷新当前结果后再操作')
-        result=self.state()
+        result=self.state(include_video=False)
         with self.lock:
             if selection!=self._selection_revision:
                 raise ProjectSelectionChanged('其他窗口已切换项目，请刷新当前结果后再操作')
@@ -840,7 +844,7 @@ class StudioController:
     def _start_payload(self,data):
         """Validate a detached selection without changing live run state."""
         action=data.get('action')
-        state=self._state_data()
+        state=self._state_data(include_video=False)
         if state.get('project_error'):raise ValueError(state['project_error'])
         if action=='local' and self._is_cloud_project():
             raise ValueError('这个项目属于云端识别，请通过云端流程继续；本地识别请新建任务')
@@ -1280,7 +1284,7 @@ class StudioController:
         except (OSError,ValueError,TypeError,KeyError,RuntimeError):
             return False
 
-    def _exported_video_path(self):
+    def _exported_video_path(self,video_matches=None):
         """Accept only the official export record at its deterministic target."""
         if not self.campaign or not self.source:return None
         manifest=read_json(self._contained_path(self._project_path(),'campaign.json'))
@@ -1299,15 +1303,44 @@ class StudioController:
         expected=video_output_path(source,target)
         output=Path(recorded).resolve()
         if output!=expected or not output.is_file():return None
-        return output if self._video_matches(output,manifest['output_sha256']) else None
+        return output if (video_matches or self._video_matches)(output,manifest['output_sha256']) else None
 
     def environment(self):
         # Explicit, bounded local probes do not occupy the task control lock.
         from .environment import probe_environment
         return probe_environment()
 
-    def preview(self,sample=None,project_id=None):
-        return self._read_view(lambda view:view._preview_data(sample),project_id)
+    def preview(self,sample=None,project_id=None,include_video=True):
+        return self._read_view(lambda view:view._preview_data(sample,include_video),project_id)
+
+    def video_results(self,sample=None,project_id=None,revision=None):
+        """Verify media independently, pinned to selection and saved review generation."""
+        if not project_id:raise ValueError('请刷新当前项目后再检查成片')
+        def read(view):
+            before=view._preview_data(sample,include_video=False)
+            current=before.get('manual_review',{}).get('revision')
+            if revision is not None and revision!=current:
+                raise ValueError('字幕版本已变化，请刷新当前结果后再检查成片')
+            descriptors=view._video_descriptors()
+            after=view._preview_data(sample,include_video=False)
+            if after.get('manual_review',{}).get('revision')!=current:
+                raise ValueError('字幕版本已变化，请刷新当前结果后再检查成片')
+            return {'project_id':before['project_id'],'selected_id':before['selected_id'],
+                    'revision':current,**descriptors}
+        return self._read_view(read,project_id)
+
+    def _video_descriptors(self):
+        identity=self._project_id()
+        descriptors={'exported_video':None,'draft_video':None}
+        for name,field in (('video','exported_video'),('draft-video','draft_video')):
+            verified=self._video_result(name)
+            if verified:
+                path,_,artifact=verified
+                descriptors[field]={'name':path.name,'media_url':'/api/'+('output-video' if name=='video' else 'draft-video')+'?project='+identity,
+                    'artifact_id':artifact,
+                    'download_url':'/api/download?name='+name+'&project='+identity+'&artifact='+artifact}
+                if name=='draft-video':descriptors[field]['review_status']='unreviewed_draft'
+        return descriptors
 
     @staticmethod
     def _review_mode_fields(review):
@@ -1315,7 +1348,7 @@ class StudioController:
         # every preview/receipt rather than being guessed from absent text.
         return {'mode':'source_only','acceptance_supported':False} if review.get('mode')=='source_only' else {}
 
-    def _preview_data(self,sample=None):
+    def _preview_data(self,sample=None,include_video=True):
         selected,choices=self._preview_selection(sample)
         language,target_language=self._selection_languages(selected)
         media=self._selection_media(selected)
@@ -1327,20 +1360,9 @@ class StudioController:
                 'selections':[{key:item[key] for key in ('id','name','offset_ms')} for item in choices],
                 'selected_id':selected['id'],'offset_ms':selected['offset_ms'],'project_id':identity,
                 'media_url':'/api/media?sample='+selected['id']+'&project='+identity,'exported_video':None,'draft_video':None}
+        if not include_video:result['video_results_pending']=True
         if not self.campaign:return result
-        exported_result=self._video_result('video')
-        if exported_result:
-            exported,_,artifact=exported_result
-            result['exported_video']={'name':exported.name,'media_url':'/api/output-video?project='+identity,
-                                      'artifact_id':artifact,
-                                      'download_url':'/api/download?name=video&project='+identity+'&artifact='+artifact}
-        draft_result=self._video_result('draft-video')
-        if draft_result:
-            draft,_,artifact=draft_result
-            result['draft_video']={'name':draft.name,'review_status':'unreviewed_draft',
-                                  'media_url':'/api/draft-video?project='+identity,
-                                  'artifact_id':artifact,
-                                  'download_url':'/api/download?name=draft-video&project='+identity+'&artifact='+artifact}
+        if include_video:result.update(self._video_descriptors())
         folder=selected['folder']
         if self._missing_approved_review(folder):
             message='已验收的人工校对记录缺失，请恢复后重新核对；未回退到机器字幕。'
@@ -1652,10 +1674,12 @@ def make_handler(controller,token,host,static_dir):
                     project_id=query.get('project',[None])[0]
                     if self.command=='HEAD' and path!='/api/download':
                         return self.json_response({'error':'接口不支持此请求'},405)
-                    if path=='/api/state':return self.json_response(controller.state())
+                    include_video=query.get('include_video',['true'])[0]!='false'
+                    if path=='/api/state':return self.json_response(controller.state() if include_video else controller.state(include_video=False))
                     if path=='/api/progress':return self.json_response(controller.progress())
                     if path=='/api/environment':return self.json_response(controller.environment())
-                    if path=='/api/preview':return self.json_response(controller.preview(sample,project_id))
+                    if path=='/api/preview':return self.json_response(controller.preview(sample,project_id) if include_video else controller.preview(sample,project_id,include_video=False))
+                    if path=='/api/video-results':return self.json_response(controller.video_results(sample,project_id,query.get('revision',[None])[0]))
                     if path=='/api/media':
                         return self.file_response(controller.media_path(sample,project_id))
                     if path=='/api/output-video':
@@ -1737,7 +1761,7 @@ def running_instance(path):
     if not 0<port<65536:return None
     connection=http.client.HTTPConnection('127.0.0.1',port,timeout=2)
     try:
-        connection.request('GET','/api/state',headers={'X-Subtitle-Token':match[2]})
+        connection.request('GET','/api/state?include_video=false',headers={'X-Subtitle-Token':match[2]})
         response=connection.getresponse()
         content=response.read(1_000_001)
         if response.status==200 and len(content)<=1_000_000:

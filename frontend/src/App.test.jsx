@@ -77,7 +77,7 @@ function server(initial = state(), custom) {
       if (url === '/api/environment') return respond({version:1,checks:{},export_ready:false,recommended_encoder:null});
       const result = await custom?.(url, body, snapshot);
       if (result) return respond(result.body, result.status);
-      if (url === "/api/state") return respond(snapshot);
+      if (url === "/api/state?include_video=false") return respond(snapshot);
       if (url === "/api/credentials") {
         snapshot = {
           ...snapshot,
@@ -121,7 +121,7 @@ function server(initial = state(), custom) {
         };
         return respond({ ok: true });
       }
-      if (url === "/api/preview")
+      if (url === "/api/preview?include_video=false")
         return respond({
           cues: [],
           media_available: false,
@@ -170,7 +170,7 @@ describe("桌面工作台的真实操作边界", () => {
   });
 
   it("allows dismissing an offline error while keeping an explicit reconnect action", async () => {
-    const requests=server(state(), url => url === '/api/state' ? {status:503,body:{error:'模拟服务未连接'}} : null);
+    const requests=server(state(), url => url === '/api/state?include_video=false' ? {status:503,body:{error:'模拟服务未连接'}} : null);
     const user=userEvent.setup(); render(<App />);
     expect(await screen.findByRole('alert')).toHaveTextContent('模拟服务未连接');
     const reads=requests.length;
@@ -397,7 +397,7 @@ describe("桌面工作台的真实操作边界", () => {
   it("announces a background completion without navigating away from the current page", async () => {
     const base=state({project_id:'same-project',campaign_status:'',job:{busy:true,action:'local',status:'running',message:'处理中',logs:[]}});
     let polls=0;
-    server(base,url=>url==='/api/state'?{body:++polls===2?{...base,job:{...base.job,busy:false,status:'complete',message:'已保存字幕'}}:base}:null);
+    server(base,url=>url==='/api/state?include_video=false'?{body:++polls===2?{...base,job:{...base.job,busy:false,status:'complete',message:'已保存字幕'}}:base}:null);
     const user=userEvent.setup();render(<App />);
     await screen.findByText('正在处理');
     await user.click(screen.getByRole('button',{name:'任务记录',exact:true}));
@@ -410,7 +410,7 @@ describe("桌面工作台的真实操作边界", () => {
 
   it.each(['initial', 'background'])("offers reconnect after a hanging %s state read and resumes polling after retry", async stage => {
     let reads = 0;
-    const requests = server(state(), url => url === '/api/state' && ++reads === (stage === 'initial' ? 1 : 2) ? new Promise(() => {}) : null);
+    const requests = server(state(), url => url === '/api/state?include_video=false' && ++reads === (stage === 'initial' ? 1 : 2) ? new Promise(() => {}) : null);
     vi.useFakeTimers();
     try {
       await act(async () => { render(<App />); });
@@ -418,7 +418,7 @@ describe("桌面工作台的真实操作边界", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
       expect(screen.getByRole('alert')).toHaveTextContent(/读取.*本地.*超时|本地.*读取.*超时/);
       expect(screen.getByRole('button', { name: '重新连接' })).toBeEnabled();
-      const stalledRead = requests.filter(request => request.url === '/api/state').at(-1);
+      const stalledRead = requests.filter(request => request.url === '/api/state?include_video=false').at(-1);
       expect(stalledRead.options.signal.aborted).toBe(true);
       expect(reads).toBe(stage === 'initial' ? 1 : 2);
 
@@ -437,7 +437,7 @@ describe("桌面工作台的真实操作边界", () => {
     let reads = 0, selectedProject = false;
     const requests = server(original, url => {
       if (url === '/api/project') { selectedProject = true; return { body: selected }; }
-      if (url !== '/api/state') return null;
+      if (url !== '/api/state?include_video=false') return null;
       if (++reads === 2) return new Promise(() => {});
       return { body: selectedProject ? selected : original };
     });
@@ -463,7 +463,7 @@ describe("桌面工作台的真实操作边界", () => {
     let reads = 0, selectionRequested = false;
     server(original, (url, body) => {
       if (url === '/api/project') { selectionRequested = true; return { body: selected }; }
-      if (url !== '/api/state') return null;
+      if (url !== '/api/state?include_video=false') return null;
       reads += 1;
       if (reads === 2) return oldPoll.promise;
       if (reads === 3) return selectedRead.promise;
@@ -493,7 +493,7 @@ describe("桌面工作台的真实操作边界", () => {
     let reads = 0;
     server(original, url => {
       if (url === '/api/run') return submission.promise;
-      if (url !== '/api/state') return null;
+      if (url !== '/api/state?include_video=false') return null;
       reads += 1;
       return reads === 2 ? oldPoll.promise : reads === 3 ? runningRead.promise : { body: original };
     });
@@ -516,7 +516,7 @@ describe("桌面工作台的真实操作边界", () => {
     const running = { ...original, job: { ...original.job, busy: true, action: 'local', status: 'running', message: '较新的处理状态', total: 10, recognized: 3 } };
     let reads = 0;
     server(original, url => {
-      if (url !== '/api/state') return null;
+      if (url !== '/api/state?include_video=false') return null;
       reads += 1;
       return reads === 2 ? oldPoll.promise : { body: reads > 2 ? running : original };
     });
@@ -540,7 +540,7 @@ describe("桌面工作台的真实操作边界", () => {
     const original = state();
     let reads = 0;
     server(original, url => {
-      if (url !== '/api/state') return null;
+      if (url !== '/api/state?include_video=false') return null;
       reads += 1;
       if (reads === 2) return oldPoll.promise;
       return reads > 2 ? { status: 503, body: { error: '本次状态读取失败' } } : { body: original };
@@ -563,7 +563,7 @@ describe("桌面工作台的真实操作边界", () => {
     let reads = 0;
     server(original, url => {
       if (url === '/api/project') return { status: 404, body: { error: '项目目录不存在' } };
-      if (url === '/api/state' && ++reads === 2) return oldPoll.promise;
+      if (url === '/api/state?include_video=false' && ++reads === 2) return oldPoll.promise;
       return null;
     });
     vi.useFakeTimers();
@@ -630,7 +630,7 @@ describe("桌面工作台的真实操作边界", () => {
     const copy = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
     render(<App />);
     const button = await screen.findByRole('button', {name:'打开项目目录'});
-    const reads = requests.filter(request => request.url === '/api/state').length;
+    const reads = requests.filter(request => request.url === '/api/state?include_video=false').length;
     await user.click(button);
     const receipt = await screen.findByRole('status', {name:'打开位置反馈'});
     expect(receipt).toHaveTextContent('已请求在文件资源管理器中打开');
@@ -639,7 +639,7 @@ describe("桌面工作台的真实操作边界", () => {
     expect(path).toHaveValue('D:\\实际项目\\任务 01');
     expect(path).toHaveAttribute('readonly');
     expect(button).toBeEnabled();
-    expect(requests.filter(request => request.url === '/api/state')).toHaveLength(reads);
+    expect(requests.filter(request => request.url === '/api/state?include_video=false')).toHaveLength(reads);
     await user.click(screen.getByRole('button', {name:'复制路径'}));
     expect(copy).toHaveBeenCalledWith('D:\\实际项目\\任务 01');
     expect(receipt).toHaveTextContent('路径已复制');
@@ -1079,7 +1079,7 @@ describe("桌面工作台的真实操作边界", () => {
 
   it("shows siliconflow audition as text and offers no subtitle download when none exists", async () => {
     server(state(), (url) =>
-      url === "/api/preview"
+      url === "/api/preview?include_video=false"
         ? {
             body: {
               cues: [],

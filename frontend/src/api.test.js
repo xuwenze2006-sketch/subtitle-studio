@@ -108,6 +108,28 @@ describe("本地状态与预览读取截止时间", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
+  it.each(["/api/state", "/api/preview?sample=sample-2&project=project-a", "/api/state?include_video=true&project=a"])("uses a lightweight GET query for %s", async path => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }))));
+    await createApi().request(path);
+    const sent = new URL(fetch.mock.calls[0][0], "http://localhost");
+    const original = new URL(path, "http://localhost");
+    expect(sent.searchParams.get("include_video")).toBe("false");
+    for (const key of ["project", "sample"]) expect(sent.searchParams.get(key)).toBe(original.searchParams.get(key));
+  });
+
+  it("lets independent video verification exceed 15 seconds and preserves caller cancellation", async () => {
+    const caller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn(pending));
+    const result = observe(createApi().request("/api/video-results?project=a&sample=main&revision=r1", undefined, { signal: caller.signal }));
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(result.settled).toBe(false);
+    expect(fetch.mock.calls[0][1].signal).toBe(caller.signal);
+    expect(caller.signal.aborted).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    caller.abort();
+    expect(fetch.mock.calls[0][1].signal.aborted).toBe(true);
+  });
+
   it.each([
     ["/api/state", "headers"], ["/api/state?project=a", "headers"],
     ["/api/preview", "headers"], ["/api/preview?sample=main&project=a", "headers"],

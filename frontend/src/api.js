@@ -53,6 +53,14 @@ export function createApi() {
   }
 
   async function sendRequest(path, body, { blob = false, head = false, downloadMetadata = false, signal } = {}) {
+    if (body === undefined && !blob && !head && ["/api/state", "/api/preview"].includes(path.split("?")[0])) {
+      // Keep the public request path stable for component mocks. Only the
+      // transport selects lightweight reads; MP4 proofs have their own lifetime.
+      const [endpoint, query] = path.split("?");
+      const params = new URLSearchParams(query);
+      params.set("include_video", "false");
+      path = `${endpoint}?${params}`;
+    }
     let response;
     try {
       response = await fetch(path, {

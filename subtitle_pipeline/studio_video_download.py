@@ -13,6 +13,20 @@ def stamp(info):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
+def cached_match(path, digest, checks):
+    """Use only a completed digest for the current stat; never queue behind I/O."""
+    lock, cache = checks
+    if not lock.acquire(blocking=False):return False
+    try:
+        signature = cache.get(str(path))
+        return (signature is not None and signature[0] == digest
+                and signature[2] == stamp(path.stat()))
+    except OSError:
+        return False
+    finally:
+        lock.release()
+
+
 def verified_open(path, digest, checks):
     """Return the same verified handle that the HTTP response will stream."""
     lock, cache = checks

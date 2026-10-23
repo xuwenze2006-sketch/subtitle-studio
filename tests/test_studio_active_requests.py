@@ -383,8 +383,9 @@ class StudioActiveRequestsTests(unittest.TestCase):
                 self.assertTrue(self.app.idle_ready(), 'Keepalive retained completed request activity')
             self.age(server)
             self.assertTrue(self.app.claim_idle_shutdown(server), 'Waiting for next headers was counted as activity')
-            response = self.request(connection, '/api/session', method='POST', body='{}',
-                                    headers={'Content-Type': 'application/json', 'Connection': 'close'})
+            # Admission is the contract here. A bodyless read avoids racing a
+            # late POST body against the already-claimed shutdown socket close.
+            response = self.request(connection, '/api/progress', headers={'Connection': 'close'})
             self.assertEqual(response.status, 503)
             response.read()
 

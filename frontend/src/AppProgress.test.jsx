@@ -14,7 +14,7 @@ describe('lightweight progress polling',()=>{
     vi.stubGlobal('fetch',vi.fn(async url=>{
       calls.push(url);
       let body={};
-      if(url==='/api/state') body={...snapshot,job:{...snapshot.job,busy:!done,status:done?'complete':'running',message:done?'处理完成':'处理中'}};
+      if(url==='/api/state?include_video=false') body={...snapshot,job:{...snapshot.job,busy:!done,status:done?'complete':'running',message:done?'处理完成':'处理中'}};
       if(url==='/api/progress') body={project_id:'p',source:snapshot.source,campaign:snapshot.campaign,
         job:{...snapshot.job,busy:!done,status:done?'complete':'running',recognized:2},persistence_warning:''};
       if(url==='/api/environment') body={version:1,checks:{},export_ready:false};
@@ -25,13 +25,13 @@ describe('lightweight progress polling',()=>{
       await act(async()=>render(<App/>));
       await act(async()=>vi.advanceTimersByTimeAsync(1100));
       expect(calls.filter(url=>url==='/api/progress')).toHaveLength(1);
-      expect(calls.filter(url=>url==='/api/state')).toHaveLength(1);
+      expect(calls.filter(url=>url==='/api/state?include_video=false')).toHaveLength(1);
       await act(async()=>vi.advanceTimersByTimeAsync(4400));
-      expect(calls.filter(url=>url==='/api/state').length).toBeGreaterThan(1);
-      const before=calls.filter(url=>url==='/api/state').length;
+      expect(calls.filter(url=>url==='/api/state?include_video=false').length).toBeGreaterThan(1);
+      const before=calls.filter(url=>url==='/api/state?include_video=false').length;
       done=true;
       await act(async()=>vi.advanceTimersByTimeAsync(1100));
-      expect(calls.filter(url=>url==='/api/state').length).toBeGreaterThan(before);
+      expect(calls.filter(url=>url==='/api/state?include_video=false').length).toBeGreaterThan(before);
       expect(screen.queryByText('处理中')).not.toBeInTheDocument();
     } finally {vi.useRealTimers();}
   });

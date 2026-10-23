@@ -135,7 +135,7 @@ describe("damaged selected projects still permit an explicit draft-resolution es
       const body = options.body && JSON.parse(options.body);
       service.calls.push({ url, body });
       const respond = (data, code = 200) => new Response(JSON.stringify(data), { status: code });
-      if (url === "/api/state") return respond(service.bad ? { ...service.active, project_error: problem, actions: {} } : service.active);
+      if (url === "/api/state?include_video=false") return respond(service.bad ? { ...service.active, project_error: problem, actions: {} } : service.active);
       if (url === "/api/environment") return respond({ version: 1, checks: {}, export_ready: false });
       if (url.startsWith("/api/preview")) return service.bad ? respond({ error: "当前项目预览暂时不可用" }, status) : respond(preview);
       if (url === "/api/project") {

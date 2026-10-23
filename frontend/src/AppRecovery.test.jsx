@@ -31,7 +31,7 @@ function server() {
     const body = options.body && JSON.parse(options.body);
     service.calls.push({ url, body });
     if (url === '/api/environment') return respond({version:1,checks:{},export_ready:false,recommended_encoder:null});
-    if (url === "/api/state") {
+    if (url === "/api/state?include_video=false") {
       const delayed = service.nextStateRead;
       service.nextStateRead = null;
       return respond(delayed ? await delayed.promise : service.active);

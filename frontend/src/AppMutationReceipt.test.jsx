@@ -18,7 +18,7 @@ function service({ rejectWrite = false, refreshGate } = {}) {
   vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
     calls.push({ url, body: options.body && JSON.parse(options.body) });
     let data = {}, status = 200;
-    if (url === "/api/state") {
+    if (url === "/api/state?include_video=false") {
       if (committed && refreshGate) await refreshGate;
       if (committed && failRefresh) { data = { error: "任务状态暂时无法读取" }; status = 503; }
       else data = snapshot;

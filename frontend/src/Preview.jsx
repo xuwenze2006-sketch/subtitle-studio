@@ -70,6 +70,35 @@ function PreviewSession({
   const [subtitleVersions] = useState(() => getSubtitleVersions(submissionOwner, projectKey));
   const versionSnapshot = useSyncExternalStore(subtitleVersions.subscribe, subtitleVersions.getSnapshot);
   const [preview, setPreview] = useState(null);
+  const videoCheckOwner = useRef(null);
+  const videoCheckFailed = useRef(false);
+  const videoGeneration = useRef(0);
+  const [videoGenerationVersion, setVideoGenerationVersion] = useState(0);
+  const [videoCheckRetry, setVideoCheckRetry] = useState(0);
+  const [videoCheckStatus, setVideoCheckStatus] = useState("");
+  const cancelVideoCheck = useCallback(() => {
+    const request = videoCheckOwner.current;
+    videoCheckOwner.current = null;
+    if (request) {
+      clearTimeout(request.timer);
+      request.controller.abort();
+    }
+  }, []);
+  const replacePreview = useCallback(data => {
+    cancelVideoCheck();
+    videoCheckFailed.current = false;
+    setVideoGenerationVersion(++videoGeneration.current);
+    setVideoCheckStatus("");
+    setPreview(data);
+  }, [cancelVideoCheck]);
+  const invalidateVideoCheck = useCallback(() => {
+    cancelVideoCheck();
+    setVideoGenerationVersion(++videoGeneration.current);
+    if (!videoCheckFailed.current) setVideoCheckStatus("");
+    // A save can invalidate an in-flight proof even before its receipt changes
+    // the review revision. Keep the need for verification so an independent
+    // check with a NEW owner can resume after the operation finishes.
+  }, [cancelVideoCheck]);
   const [loading, setLoading] = useState(false);
   const [time, setTime] = useState(restoredSession?.time ?? 0);
   const [mediaFailed, setMediaFailed] = useState(false);
@@ -180,8 +209,9 @@ function PreviewSession({
     video.current?.pause();
     requestVersion.current += 1;
     cancelVideoDownload();
+    cancelVideoCheck();
     downloadRequest.current = null;
-  }, [cancelVideoDownload]);
+  }, [cancelVideoDownload, cancelVideoCheck]);
   useEffect(() => {
     const version = ++requestVersion.current;
     cancelVideoDownload();
@@ -189,7 +219,7 @@ function PreviewSession({
     const controller = new AbortController();
     video.current?.pause();
     replayRange.current = null;
-    setPreview(null);
+    replacePreview(null);
     setTime(restorePosition.current ?? 0);
     setDownload("");
     setDownloaded("");
@@ -217,7 +247,7 @@ function PreviewSession({
             restorePosition.current = null;
             setTime(0);
           }
-          setPreview(data);
+          replacePreview(data);
           setSelections(data.selections || []);
           restoreReviewDraft(data);
         }
@@ -250,7 +280,49 @@ function PreviewSession({
     onError,
     restoreReviewDraft,
     cancelVideoDownload,
+    replacePreview,
   ]);
+  const videoCheckBlocked = connection !== "connected" || !!disabled || !!snapshot?.job?.busy || reviewBusy || reviewPending || savingVersion ||
+    !!reviewSubmissions.peekResult(selectedId) || !!reviewConflict || !!preview?.manual_review?.conflict;
+  useLayoutEffect(() => {
+    if (videoCheckBlocked) invalidateVideoCheck();
+  }, [videoCheckBlocked, invalidateVideoCheck]);
+  useEffect(() => {
+    if (preview?.video_results_pending !== true || videoCheckFailed.current || !preview.project_id ||
+        preview.project_id !== snapshot?.project_id || videoCheckBlocked) return undefined;
+    const request = { controller: new AbortController(), generation: videoGeneration.current, version: requestVersion.current, timer: null };
+    videoCheckOwner.current = request;
+    const expected = { project: preview.project_id, sample: preview.selected_id, revision: preview.manual_review?.revision ?? null };
+    const current = () => videoCheckOwner.current === request && !request.controller.signal.aborted &&
+      request.generation === videoGeneration.current && request.version === requestVersion.current;
+    setVideoCheckStatus("pending");
+    request.timer = setTimeout(() => { if (current()) setVideoCheckStatus("slow"); }, 15000);
+    const params = new URLSearchParams({ project: expected.project, sample: expected.sample });
+    if (expected.revision != null) params.set("revision", expected.revision);
+    api.request(`/api/video-results?${params}`, undefined, { signal: request.controller.signal }).then(data => {
+      if (!current()) return;
+      if (data?.project_id !== expected.project || data?.selected_id !== expected.sample || data?.revision !== expected.revision) {
+        throw new Error("项目或字幕版本已变化，请重试检查。");
+      }
+      // Video verification owns only descriptors, never cue text or drafts.
+      setPreview(previous => current() && previous?.project_id === expected.project && previous?.selected_id === expected.sample &&
+        (previous?.manual_review?.revision ?? null) === expected.revision
+        ? { ...previous, video_results_pending: false, exported_video: data.exported_video ?? null, draft_video: data.draft_video ?? null } : previous);
+      setVideoCheckStatus("");
+    }).catch(error => {
+      if (current()) {
+        videoCheckFailed.current = true;
+        setVideoCheckStatus(`error:${error.message}`);
+      }
+    }).finally(() => {
+      clearTimeout(request.timer);
+    });
+    return () => {
+      if (videoCheckOwner.current === request) cancelVideoCheck();
+      else { clearTimeout(request.timer); request.controller.abort(); }
+    };
+  }, [api, preview?.video_results_pending, preview?.project_id, preview?.selected_id, preview?.manual_review?.revision,
+    snapshot?.project_id, videoCheckBlocked, videoGenerationVersion, videoCheckRetry, cancelVideoCheck]);
   const cueViews=useRef(new WeakMap()), searchEntries=useRef(new WeakMap());
   const cues = useMemo(() => (preview?.cues || []).map(cue=>{
     if(!cueViews.current.has(cue)) cueViews.current.set(cue,{...cue,ja:cue.source_text ?? cue.ja,zh:cue.target_text ?? cue.zh});
@@ -316,7 +388,7 @@ function PreviewSession({
         ++requestVersion.current;
         setLoading(false);
         setLoadFailed(false);
-        setPreview(acceptedPreview);
+        replacePreview(acceptedPreview);
         setSelections(acceptedPreview.selections || []);
       }
       const latestRevision = (applyAcceptedPreview ? acceptedPreview : preview)?.manual_review?.revision;
@@ -348,7 +420,7 @@ function PreviewSession({
     const unchecked = shouldAdvance ? data.cues.map((cue, index) => ({cue, index})).filter(({cue}) =>
       !cue.review_status || cue.review_status === "unchecked") : [];
     const nextEntry = unchecked.find(({index}) => index > savedCueIndex) || unchecked[0];
-    setPreview(data);
+    replacePreview(data);
     setSelections(data.selections || []);
     if (matchesSubmittedFields(reviewDraft, submission)) {
       // Another window may have replaced this segment's persisted draft after
@@ -389,7 +461,7 @@ function PreviewSession({
       ? nextEntry ? "本句已保存，已定位下一条未检查字幕。" : "本句已保存，当前片段没有未检查字幕。"
       : matchesSubmittedFields(reviewDraft, submission) ? "本句修改与核对状态已保存。" : "本次提交已保存；之后的修改仍需保存。");
     void refreshTaskState("本句修改已保存");
-  }, [reviewSubmissions, submissionVersion, selectedId, refreshTaskState, reviewDraft, preview, projectKey]);
+  }, [reviewSubmissions, submissionVersion, selectedId, refreshTaskState, reviewDraft, preview, projectKey, replacePreview]);
   const offset = Number(preview?.offset_ms) || 0;
   const canPlay = !!preview?.media_available && !mediaFailed && !loading;
   const searchText = query.trim().normalize("NFKC").toLocaleLowerCase();
@@ -418,6 +490,7 @@ function PreviewSession({
   const switchSelection = (value) => {
     if (reviewDirty) { setReviewNotice("有未保存修改，请先保存或放弃后再切换片段。"); return; }
     ++requestVersion.current;
+    cancelVideoCheck();
     cancelVideoDownload();
     downloadRequest.current = null;
     video.current?.pause();
@@ -436,7 +509,7 @@ function PreviewSession({
     setReviewConflict("");
     setReviewNotice("");
     setDraftStorageWarning("");
-    setPreview(null);
+    replacePreview(null);
     setQuery("");
     setFollowPlayback(true);
     setLocateRequest(null);
@@ -565,6 +638,7 @@ function PreviewSession({
     if (event.detail > 1) return;
     if (reviewDirty || reviewBusy || reviewSubmissions.pending(selectedId)) { setReviewNotice("请先保存本句修改，并等待保存完成后再导出字幕。"); return; }
     if (!supportsFileVersions || disabled || loading || downloadRequest.current || snapshot?.job?.busy || !preview) return;
+    invalidateVideoCheck();
     subtitleVersions.submit(selectedId, preview.project_id,
       () => api.request("/api/save-subtitles", { project_id: preview.project_id, sample: selectedId }));
   };
@@ -608,6 +682,7 @@ function PreviewSession({
   };
   const refreshReview = async ({ preserveNotice = false } = {}) => {
     if (!preview || reviewBusy || disabled || loading || snapshot?.job?.busy) return;
+    invalidateVideoCheck();
     cancelVideoDownload();
     setDownload(current => current === "draft-video" || current === "video" ? "" : current);
     setVideoDownloadNotice("");
@@ -619,7 +694,7 @@ function PreviewSession({
       const params = new URLSearchParams({ sample: selectedId, project: preview.project_id });
       const data = await api.request(`/api/preview?${params}`);
       if (version !== requestVersion.current) return;
-      setPreview(data);
+      replacePreview(data);
       setSelections(data.selections || []);
       setReviewConflict(data.manual_review?.conflict || "");
       setReviewDraft(current => {
@@ -659,6 +734,7 @@ function PreviewSession({
     if (!range) return;
     const { start_ms: start, end_ms: end } = range;
     if (status === "issue" && !fields.note.trim()) { setReviewError("请填写核对备注，说明本句疑点。"); return; }
+    invalidateVideoCheck();
     const cue = cues.find(item => item.id === reviewDraft.cueId);
     const stale = !sourceOnly && (cue?.translation_stale || fields.source_text !== (cue?.source_text ?? cue?.ja ?? ""));
     const finalStatus = stale && !fields.translation_confirmed && status === "checked" ? "unchecked" : status;
@@ -673,6 +749,7 @@ function PreviewSession({
   };
   const acceptReview = () => {
     if (!supportsReview || sourceOnly || preview.manual_review.acceptance_supported === false || selectedId !== "main" || disabled || loading || reviewBusy || reviewDirty || snapshot?.job?.busy || reviewConflict || draftConflict || !preview.manual_review.summary?.can_accept) return;
+    invalidateVideoCheck();
     ++taskRefreshRequest.current;
     setReviewError("");
     const readVersion = requestVersion.current;
@@ -789,7 +866,7 @@ function PreviewSession({
             icon={RefreshCw}
             disabled={disabled || loading}
             busy={loading}
-            onClick={() => { if (supportsReview) void refreshReview(); else { restorePosition.current = null; setRevision((v) => v + 1); } }}
+            onClick={() => { if (supportsReview) void refreshReview(); else { invalidateVideoCheck(); restorePosition.current = null; setRevision((v) => v + 1); } }}
           >
             刷新结果
           </Button>
@@ -797,6 +874,13 @@ function PreviewSession({
         </div>
       </div>
       {videoDownloadNotice && <p className="preview-download-receipt" role="status">{videoDownloadNotice}</p>}
+      {(videoCheckStatus === "pending" || videoCheckStatus === "slow") && <p className="preview-loading" role="status">
+        正在检查已导出 MP4…{videoCheckStatus === "slow" && " 大文件可能需要较长时间，字幕编辑和保存可继续。"}
+      </p>}
+      {videoCheckStatus.startsWith("error:") && <Notice tone="warning" title="已导出 MP4 检查失败"
+        action={<Button disabled={videoCheckBlocked} onClick={() => { videoCheckFailed.current = false; setVideoCheckRetry(value => value + 1); }}>重试 MP4 检查</Button>}>
+        {videoCheckStatus.slice(6)} 字幕编辑和保存可继续。
+      </Notice>}
       {loading && <p className="preview-loading" role="status">正在读取所选片段…</p>}
       <div className="preview-layout">
         <section className="card player-card">
