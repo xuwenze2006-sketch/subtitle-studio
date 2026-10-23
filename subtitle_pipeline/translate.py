@@ -286,7 +286,7 @@ def _looks_copied(original: str, translation: str, source: str, target: str) -> 
 
 def translate_texts(texts: list[str], source: str, target: str, cache_path: Path,
                     stop_event: threading.Event | None = None) -> list[str]:
-    """Translate cues in their original order, persisting each successful batch.
+    """Translate cues in order, retaining completed results across retries.
 
     Requests across callers in this process share one queue and a 0.5 s minimum
     interval. Up to 16 cues / 1200 characters are batched with paired IDs; failed
@@ -341,11 +341,18 @@ def translate_texts(texts: list[str], source: str, target: str, cache_path: Path
                 except _InvalidResponse:
                     pass
             if translated is not None:
-                for index, original in enumerate(batch):
-                    if (not valid_translation_content(original, translated[index])
-                            or _looks_copied(original, translated[index], source, target)):
-                        translated[index] = client.translate(original)
-                save(batch, translated)
+                originals, translations, repairs = [], [], []
+                for original, translation in zip(batch, translated, strict=True):
+                    if (not valid_translation_content(original, translation)
+                            or _looks_copied(original, translation, source, target)):
+                        repairs.append(original)
+                    else:
+                        originals.append(original)
+                        translations.append(translation)
+                if originals:
+                    save(originals, translations)
+                for original in repairs:
+                    save([original], [client.translate(original)])
             else:
                 for text in batch:
                     save([text], [client.translate(text)])
